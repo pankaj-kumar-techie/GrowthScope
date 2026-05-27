@@ -30,6 +30,15 @@ db.exec(`
     full_report_generated_at DATETIME
   );
 
+  CREATE TABLE IF NOT EXISTS mappack_cache (
+    keyword      TEXT NOT NULL,
+    city         TEXT NOT NULL,
+    state        TEXT NOT NULL,
+    items_json   TEXT NOT NULL,
+    fetched_at   DATETIME DEFAULT (datetime('now')),
+    PRIMARY KEY (keyword, city, state)
+  );
+
   CREATE TABLE IF NOT EXISTS pagespeed_cache (
     domain        TEXT NOT NULL,
     strategy      TEXT NOT NULL CHECK(strategy IN ('mobile','desktop')),
@@ -43,5 +52,11 @@ db.exec(`
     PRIMARY KEY (domain, strategy)
   );
 `);
+
+// Remove old-format mappack_cache entries where keyword contains a space
+// (old format was "Electrical Dallas Texas"; new format is just "Electrical").
+// Old entries would never be hit by new queries anyway (different cache key),
+// but purging them avoids confusion and frees space.
+db.prepare(`DELETE FROM mappack_cache WHERE keyword LIKE '% %'`).run();
 
 export default db;

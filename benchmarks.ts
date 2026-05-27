@@ -35,6 +35,38 @@ export const INDUSTRY_BENCHMARKS: Record<string, NicheBenchmark> = {
   "Insulation": { cvr: 2.0, avg_ticket: 3200, confidence: "M" },
 };
 
+// Buyer-intent search terms per niche — keys must match INDUSTRY_BENCHMARKS exactly.
+// getBuyerIntentKeywords() resolves any input through findBenchmark first so fuzzy
+// inputs like "Roofing" still reach the "Roofing Replacement" keyword list.
+export const NICHE_KEYWORDS: Record<string, string[]> = {
+  "Plumbing":                        ["plumber", "plumbing service", "emergency plumber"],
+  "HVAC":                            ["hvac contractor", "ac repair", "air conditioning repair"],
+  "Electrical":                      ["electrician", "electrical contractor", "electrical repair"],
+  "Roofing Replacement":             ["roofing contractor", "roofer", "roof repair"],
+  "Pest Control":                    ["pest control", "exterminator", "pest exterminator"],
+  "Tree Service":                    ["tree service", "tree removal", "tree trimming"],
+  "Painting":                        ["painting contractor", "house painter", "interior painter"],
+  "Flooring":                        ["flooring contractor", "flooring installation", "floor installer"],
+  "Concrete":                        ["concrete contractor", "concrete company", "concrete repair"],
+  "Siding":                          ["siding contractor", "siding installation", "siding company"],
+  "Foundation Repair":               ["foundation repair", "foundation contractor", "foundation company"],
+  "Drywall":                         ["drywall contractor", "drywall repair", "drywall installation"],
+  "Junk Removal / Demolition":       ["junk removal", "junk hauling", "junk pickup"],
+  "Garage Door Repair / Install":    ["garage door repair", "garage door installation", "garage door company"],
+  "Window & Door Replacement":       ["window replacement", "window contractor", "window installation"],
+  "Fences & Decks":                  ["fence contractor", "fence installation", "fencing company"],
+  "Handyman":                        ["handyman service", "handyman", "handyman near me"],
+  "Carpet Installation":             ["carpet installation", "carpet installer", "carpet company"],
+  "Kitchen Remodeling":              ["kitchen remodeling", "kitchen renovation", "kitchen contractor"],
+  "Bathroom Remodeling":             ["bathroom remodeling", "bathroom renovation", "bathroom contractor"],
+  "Window Cleaning":                 ["window cleaning service", "window cleaner", "commercial window cleaning"],
+  "Solar Installation":              ["solar installation", "solar company", "solar panel installer"],
+  "Pool Installation":               ["pool installation", "pool builder", "swimming pool contractor"],
+  "Insulation":                      ["insulation contractor", "insulation installation", "insulation company"],
+  "Fire & Water Damage Restoration": ["water damage restoration", "fire damage restoration", "restoration company"],
+  "Garage Conversion / ADU":         ["adu contractor", "garage conversion contractor", "accessory dwelling unit"],
+};
+
 export function findBenchmark(input: string): { key: string; bm: NicheBenchmark } {
   const i = input.toLowerCase().trim();
   for (const key of Object.keys(INDUSTRY_BENCHMARKS)) {
@@ -84,4 +116,12 @@ export function calculateRevenueLoss(monthlyTraffic: number, nicheInput: string)
     loss_high_usd: Math.round(loss * 1.3),
     confidence: bm.confidence,
   };
+}
+
+// Returns 2–3 real buyer-intent search terms for a niche.
+// Uses findBenchmark() to resolve fuzzy inputs ("Roofing" → "Roofing Replacement")
+// so the correct keyword list is always returned regardless of how vertical was submitted.
+export function getBuyerIntentKeywords(vertical: string): string[] {
+  const { key } = findBenchmark(vertical);
+  return (NICHE_KEYWORDS[key] ?? [vertical.toLowerCase()]).slice(0, 3);
 }
