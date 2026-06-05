@@ -4,6 +4,42 @@ import type { GBPReviewInsights } from '../services/gbp';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || "" });
 
+export async function extractLeadInsights(
+  pageText: string,
+  city: string,
+  state: string,
+): Promise<{ owner: string; serviceArea: string }> {
+  if (!pageText) return { owner: '', serviceArea: 'Not clearly specified' };
+  const prompt = `From this website text, extract:
+1. Owner or founder name (look for "owner", "founder", "president", "I'm [Name]", "My name is [Name]", "founded by [Name]". Return empty string if not clearly found.)
+2. Service areas (cities, counties, or regions explicitly mentioned as places the business serves. Return comma-separated list. If not clearly listed, return "Not clearly specified".)
+
+Business context: located in ${city}, ${state}
+Website text:
+${pageText.substring(0, 3000)}
+
+Respond ONLY with valid JSON: {"owner":"name or empty string","serviceArea":"City1, City2, ... or Not clearly specified"}`;
+
+  try {
+    const r = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001', max_tokens: 150,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const raw = (r.content[0] as any).text.trim();
+    const s = raw.indexOf('{'), e = raw.lastIndexOf('}');
+    if (s !== -1 && e !== -1) {
+      const parsed = JSON.parse(raw.substring(s, e + 1));
+      return {
+        owner: parsed.owner ?? '',
+        serviceArea: parsed.serviceArea ?? 'Not clearly specified',
+      };
+    }
+  } catch (err: any) {
+    console.warn('[extractLeadInsights] Claude failed:', err.message);
+  }
+  return { owner: '', serviceArea: 'Not clearly specified' };
+}
+
 export async function classifyNiche(text: string, title: string, provided?: string): Promise<string> {
   if (provided) return provided;
   try {
@@ -35,55 +71,31 @@ export async function generateColdEmail(p: {
   gbpPostsPerWeek: number | null;
 }): Promise<{ subject: string; body: string }> {
   const { leadName, city, state, vertical, leadPosition, leadReviews, leadRating,
-          competitorName, competitorPosition, competitorReviews, monthlyLoss,
-          reviewInsights, gbpPostsPerWeek } = p;
+          competitorName, competitorPosition, competitorReviews, monthlyLoss } = p;
 
-  // Skip "replies to reviews" claim and snippet text when reply data is unavailable —
-  // Places API fallback returns reviews with no attribution, so snippets may be from a
-  // different business (e.g. a rebranded predecessor sharing the same place_id).
-  const reviewContext = reviewInsights
-    ? [
-        !reviewInsights.replyDataAvailable
-          ? ''
-          : reviewInsights.hasUnansweredRecent ? `${leadName} has unanswered Google reviews.` : `${leadName} replies to reviews (good habit).`,
-        reviewInsights.replyDataAvailable && reviewInsights.snippets.length > 0
-          ? `Recent customer feedback: ${reviewInsights.snippets[0]}`
-          : '',
-      ].filter(Boolean).join(' ')
-    : '';
+  const prompt = `Write a short cold email from a local marketing agency (ARMA) to a business owner.
+Goal: make them want a full 6-page audit report.
 
-  const gbpContext = gbpPostsPerWeek != null
-    ? (gbpPostsPerWeek >= 2 ? `GBP posts ${gbpPostsPerWeek.toFixed(1)}×/week (active).` : `GBP shows no recent post activity.`)
-    : '';
-
-  const prompt = `You are writing a cold outreach email on behalf of a digital marketing agency (ARMA) that ran a local SEO audit on this business.
-
-REAL AUDIT DATA (use every number verbatim — do not round or change):
-- Business: ${leadName}, ${city}, ${state}
-- Vertical: ${vertical}
-- Their map pack position: #${leadPosition} (avg across 3 buyer-intent searches)
-- Main competitor outranking them: ${competitorName} at #${competitorPosition}
-- Lead reviews: ${leadReviews} at ${leadRating}★ | Competitor reviews: ${competitorReviews}
+AUDIT FINDINGS (use verbatim — no rounding):
+- Business: ${leadName} · ${city}, ${state} · ${vertical}
+- Their Google Maps position: #${leadPosition}
+- Top competitor outranking them: ${competitorName} at #${competitorPosition}
+- Their reviews: ${leadReviews} reviews at ${leadRating}★ | Competitor: ${competitorReviews} reviews
 - Estimated monthly revenue gap: $${monthlyLoss.toLocaleString()}
-- ${reviewContext}
-- ${gbpContext}
 
 RULES:
-1. Write a SHORT cold email — subject line + 3–4 sentences body. No fluff.
-2. Style: Alex Hormozi. Direct. Business consequence first. Zero SEO jargon.
-3. First sentence must name a SPECIFIC finding from the audit data (position, competitor, or review insight).
-4. Second sentence must reference the dollar number.
-5. Third sentence frames what fixing this looks like — brief, credible.
-6. Final sentence is a simple low-pressure CTA: reply or book a 15-min call. No "I hope this finds you well."
-7. The owner must feel this email was written specifically for their business, not a template blast.
-8. Output ONLY valid JSON: {"subject": "...", "body": "..."}
-
-Write the email now.`;
+1. Subject line: under 10 words, specific, name the business or city.
+2. Body: exactly 3 sentences.
+   - Sentence 1: state the specific gap (their position vs competitor's, with dollar figure).
+   - Sentence 2: tell them we put together a quick audit brief and attached it.
+   - Sentence 3: soft CTA — reply to get the full detailed audit with specific fix steps.
+3. No SEO jargon. No "I hope this finds you well." No bullet points.
+4. Output ONLY valid JSON: {"subject":"...","body":"..."}`;
 
   try {
     const r = await anthropic.messages.create({
-      model: "claude-sonnet-4-5", max_tokens: 400,
-      messages: [{ role: "user", content: prompt }],
+      model: 'claude-haiku-4-5-20251001', max_tokens: 250,
+      messages: [{ role: 'user', content: prompt }],
     });
     const raw = (r.content[0] as any).text.trim();
     try { return JSON.parse(raw); } catch {}
@@ -93,13 +105,9 @@ Write the email now.`;
     console.warn('[ColdEmail] Claude failed, using fallback:', err.message);
   }
 
-  // Deterministic fallback
-  const reviewNote = reviewInsights?.hasUnansweredRecent
-    ? ` Your profile also has unanswered reviews — each one signals neglect to Google's algorithm.`
-    : '';
   return {
-    subject: `${leadName} — ranking gap found for ${vertical} in ${city}`,
-    body: `I ran a local map pack audit on ${leadName} and found you sitting at #${leadPosition} for "${vertical}" searches in ${city} while ${competitorName} holds #${competitorPosition}.${reviewNote} Based on search volume and your average job ticket, that gap is worth roughly $${monthlyLoss.toLocaleString()}/month in jobs going elsewhere. Three specific fixes — two of them free — could close most of that gap within 60 days. Worth a 15-minute call to walk through what I found?`,
+    subject: `${leadName} — quick visibility check for ${city}`,
+    body: `I ran a quick Google Maps check on ${leadName} and found you at #${leadPosition} while ${competitorName} holds #${competitorPosition} — a gap worth roughly $${monthlyLoss.toLocaleString()}/month in missed calls. I put together a short brief with the numbers (attached). If you'd like the full audit with the exact steps to close that gap, just reply and I'll send it over.`,
   };
 }
 
@@ -119,7 +127,10 @@ export async function analyzeWithClaude(p: {
   const scoreLabel = (s: any): string => s?.score != null ? `${s.score}/100` : 'N/A';
   const lcpLabel = (s: any): string => s?.lcp ?? 'N/A';
 
-  const callsToComp = dailySearches > 0 ? Math.round(dailySearches * 0.38) : null;
+  // CTR by map-pack position (approximate industry averages)
+  const posCTR = (pos: number) =>
+    pos <= 1 ? 0.38 : pos <= 2 ? 0.17 : pos <= 3 ? 0.11 : pos <= 5 ? 0.07 : pos <= 8 ? 0.05 : 0.03;
+  const callsToComp = dailySearches > 0 ? Math.round(dailySearches * posCTR(competitor.position)) : null;
   const callsToLeadRaw = dailySearches > 0 ? Math.round(dailySearches * (lead.position <= 3 ? 0.10 : lead.position <= 6 ? 0.05 : 0.03)) : null;
   const callsToLead = callsToLeadRaw != null && callsToLeadRaw > 0 ? callsToLeadRaw : null;
   const bounceLoss = Math.round(revenue.monthly_loss * (speedScore(speed) < 60 ? 0.25 : 0.12));

@@ -1,76 +1,149 @@
 import { fetchT } from '../lib/http';
-import { dfsAuth } from '../lib/auth';
 import db from '../db';
 import { getBuyerIntentKeywords } from '../benchmarks';
+import { dfsAuth } from '../lib/auth';
+import { resolveStateName } from '../services/gbp';
 
-// ─── Exported config constants ─────────────────────────────────────────────────
-// Override any of these per-call via MapPackConfig, or change the defaults here.
-
-export interface CompRule {
-  maxLeadPos: number;
-  targetPos: number;
-  fallbackPos: number;
-  label: string;
-}
-
-export const DEFAULT_COMP_RULES: CompRule[] = [
-  { maxLeadPos: 4,  targetPos: 1, fallbackPos: 2, label: "client #2–4  → comp #1"  },
-  { maxLeadPos: 8,  targetPos: 3, fallbackPos: 2, label: "client #5–8  → comp #3"  },
-  { maxLeadPos: 13, targetPos: 4, fallbackPos: 3, label: "client #9–13 → comp #4"  },
-  { maxLeadPos: 20, targetPos: 6, fallbackPos: 5, label: "client #14–20 → comp #5/6"},
-  { maxLeadPos: 99, targetPos: 8, fallbackPos: 6, label: "client #21+  → comp #8"  },
-];
-
-// Brand name fragments to exclude from competitor selection.
-// All comparisons are lowercase `.includes()` — partial matches are intentional.
-export const DEFAULT_EXCLUDED_BRANDS: string[] = [
-  "roto-rooter", "mr. rooter", "mr rooter",
-  "mr. electric", "mr electric",
-  "mister sparky",
-  "one hour heating", "one hour air",
-  "benjamin franklin plumbing",
-  "comfort systems",
-  "terminix", "orkin",
-  "servicemaster", "servpro",
-  "home depot", "lowes",
-  "1-800", "angi", "homeadvisor", "thumbtack",
-  "molly maid", "the maids",
-];
-
-// ─── Per-call config ────────────────────────────────────────────────────────────
+// Brand fragments excluded from competitor selection.
+// Empty by default — pass your own list via MapPackConfig.excludedBrands.
+export const DEFAULT_EXCLUDED_BRANDS: string[] = [];
 
 export interface MapPackConfig {
-  /** Country appended to location string — e.g. "United States", "Canada". Empty string omits it. */
-  country?: string;
-  /** DataForSEO language_code. Defaults to "en". */
-  languageCode?: string;
-  /** Max results to request from DataForSEO. Defaults to 50. */
-  resultLimit?: number;
-  /** Brand fragments excluded from competitor selection. Defaults to DEFAULT_EXCLUDED_BRANDS. */
   excludedBrands?: string[];
-  /** Competitor position selection rules. Defaults to DEFAULT_COMP_RULES. */
-  compRules?: CompRule[];
+  /** Internal: skip competitor lookup for secondary keyword searches. */
+  _skipCompetitor?: boolean;
 }
 
-const US_STATES: Record<string, string> = {
-  AL:'Alabama',AK:'Alaska',AZ:'Arizona',AR:'Arkansas',CA:'California',CO:'Colorado',
-  CT:'Connecticut',DE:'Delaware',FL:'Florida',GA:'Georgia',HI:'Hawaii',ID:'Idaho',
-  IL:'Illinois',IN:'Indiana',IA:'Iowa',KS:'Kansas',KY:'Kentucky',LA:'Louisiana',
-  ME:'Maine',MD:'Maryland',MA:'Massachusetts',MI:'Michigan',MN:'Minnesota',
-  MS:'Mississippi',MO:'Missouri',MT:'Montana',NE:'Nebraska',NV:'Nevada',
-  NH:'New Hampshire',NJ:'New Jersey',NM:'New Mexico',NY:'New York',NC:'North Carolina',
-  ND:'North Dakota',OH:'Ohio',OK:'Oklahoma',OR:'Oregon',PA:'Pennsylvania',
-  RI:'Rhode Island',SC:'South Carolina',SD:'South Dakota',TN:'Tennessee',TX:'Texas',
-  UT:'Utah',VT:'Vermont',VA:'Virginia',WA:'Washington',WV:'West Virginia',
-  WI:'Wisconsin',WY:'Wyoming',DC:'District of Columbia',
-};
-
-function buildLocationName(city: string, state: string, country: string): string {
-  const fullState = US_STATES[state.trim().toUpperCase()] ?? state;
-  return [city, fullState, country].filter(Boolean).join(',');
+//  Lead #2–4  → compare with #1   (within striking distance)
+//  Lead #5–8  → compare with #3   (achievable next step)
+//  Lead #9–13 → compare with #4
+//  Lead #14+  → compare with #5
+function pickCompetitorRank(leadPos: number): number {
+  if (leadPos <= 1)  return 2;
+  if (leadPos <= 4)  return 1;
+  if (leadPos <= 8)  return 3;
+  if (leadPos <= 13) return 4;
+  return 5;
 }
 
-// ─── Local Map Pack ─────────────────────────────────────────────────────────────
+// In-memory geocode cache — city+state → lat/lng (persists for process lifetime).
+const _geocodeCache = new Map<string, { lat: number; lng: number }>();
+
+async function geocodeCity(city: string, state: string): Promise<{ lat: number; lng: number } | null> {
+  const key = `${city.toLowerCase()},${state.toLowerCase()}`;
+  if (_geocodeCache.has(key)) return _geocodeCache.get(key)!;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(`${city}, ${state}`)}&key=${process.env.GOOGLE_PLACES_API_KEY}`;
+    const res  = await fetchT(url, {}, 10000);
+    const json = await res.json();
+    if (json.status !== 'OK' || !json.results?.length) return null;
+    const loc    = json.results[0].geometry.location;
+    const coords = { lat: loc.lat as number, lng: loc.lng as number };
+    _geocodeCache.set(key, coords);
+    console.log(`[MapPack] Geocoded "${city}, ${state}" → ${coords.lat},${coords.lng}`);
+    return coords;
+  } catch (e: any) {
+    console.warn('[MapPack] Geocode error:', e.message);
+    return null;
+  }
+}
+
+// Fetch Google Places Text Search results for a query.
+// Results are ordered by Google's prominence ranking — position 1 = #1 on Google Maps.
+// Fetches up to 3 pages (60 results) to find businesses ranked lower on the map.
+async function searchGooglePlaces(query: string, coords?: { lat: number; lng: number }): Promise<any[]> {
+  if (!process.env.GOOGLE_PLACES_API_KEY) {
+    console.warn('[MapPack] GOOGLE_PLACES_API_KEY not set — cannot fetch rankings');
+    return [];
+  }
+  const allResults: any[] = [];
+  let pageToken: string | undefined;
+
+  for (let page = 0; page < 3; page++) {
+    if (page > 0 && !pageToken) break;
+    // Google requires a short pause before using next_page_token
+    if (page > 0) await new Promise(r => setTimeout(r, 2000));
+    try {
+      let url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${process.env.GOOGLE_PLACES_API_KEY}`;
+      // Bias results to city centre (20 km radius) — brings rankings closer to the
+      // Map Pack a user in that city would see, without restricting to the radius only.
+      if (coords) url += `&location=${coords.lat},${coords.lng}&radius=20000`;
+      if (pageToken) url += `&pagetoken=${pageToken}`;
+      const res  = await fetchT(url, {}, 15000);
+      const json = await res.json();
+      if (json.status === 'ZERO_RESULTS') break;
+      if (json.status !== 'OK') {
+        console.warn(`[MapPack] Places status="${json.status}" query="${query}"`);
+        break;
+      }
+      allResults.push(...(json.results ?? []));
+      pageToken = json.next_page_token;
+      if (!pageToken) break;
+    } catch (e: any) {
+      console.warn('[MapPack] Places search error:', e.message);
+      break;
+    }
+  }
+  return allResults;
+}
+
+// Fetch Google Maps rankings via DataForSEO SERP — returns results exactly as
+// users see them on Google Maps, unlike the Places Text Search API.
+async function searchDataForSEOMaps(
+  query: string,
+  city: string,
+  state: string,
+): Promise<any[] | null> {
+  if (!process.env.DATAFORSEO_LOGIN) return null;
+  try {
+    const fullState = await resolveStateName(city, state);
+    const body = {
+      keyword:       query,
+      location_name: `${city},${fullState},United States`,
+      language_name: 'English',
+      depth:         100,
+    };
+    const res  = await fetchT(
+      'https://api.dataforseo.com/v3/serp/google/maps/live/advanced',
+      {
+        method:  'POST',
+        headers: { Authorization: `Basic ${dfsAuth()}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify([body]),
+      },
+      30000,
+    );
+    const json     = await res.json();
+    const task0    = json.tasks?.[0];
+    const taskCode = task0?.status_code;
+    if (taskCode && taskCode !== 20000) {
+      console.warn(`[MapPack] DFS Maps status ${taskCode}: ${task0?.status_message} for "${query}"`);
+      return null;
+    }
+    const items: any[] = (task0?.result?.[0]?.items ?? [])
+      .filter((i: any) => i.type === 'maps_search' && i.title)
+      // Sort by rank_group so sponsored/mixed results don't shift organic positions.
+      .sort((a: any, b: any) => (a.rank_group ?? 999) - (b.rank_group ?? 999));
+    console.log(`[MapPack] DFS Maps: ${items.length} results for "${query}"`);
+    if (!items.length) return null;
+    items.forEach((p: any) =>
+      console.log(`  #${p.rank_group ?? '?'} "${p.title}" reviews:${p.rating?.votes_count ?? 0} place_id:${p.place_id ?? 'none'}`)
+    );
+    return items.map((i: any) => ({
+      name:               i.title ?? '',
+      rating:             i.rating?.value ?? 0,
+      user_ratings_total: i.rating?.votes_count ?? 0,
+      place_id:           i.place_id ?? null,
+      rank_group:         typeof i.rank_group === 'number' ? i.rank_group : null,
+    }));
+  } catch (e: any) {
+    console.warn('[MapPack] DFS Maps error:', e.message);
+    return null;
+  }
+}
+
+// ─── Local Map Pack ─────────────────────────────────────────────────────────
+// Prefers DataForSEO SERP Maps (matches what users see on Google Maps).
+// Falls back to Google Places Text Search when DFS is unavailable.
 
 async function getLocalMapPack(
   vertical: string,
@@ -82,212 +155,187 @@ async function getLocalMapPack(
   leadPlaceId = "",
   leadRating = 0,
   searchKeyword?: string,
-  config: MapPackConfig = {}
+  config: MapPackConfig = {},
 ) {
-  const {
-    country       = "United States",
-    languageCode  = "en",
-    resultLimit   = 50,
-    excludedBrands = DEFAULT_EXCLUDED_BRANDS,
-    compRules      = DEFAULT_COMP_RULES,
-  } = config;
+  const { excludedBrands = DEFAULT_EXCLUDED_BRANDS, _skipCompetitor = false } = config;
+  const keyword  = searchKeyword ?? vertical;
+  const query    = `${keyword} in ${city}`;
+  const cacheKey = keyword;
 
-  const keyword      = searchKeyword ?? vertical;
-  const locationName = buildLocationName(city, state, country);
+  // ── Cache (24-hour TTL) ────────────────────────────────────────────────────
+  let places: any[];
+  let dataSource = 'google_places';
 
-  console.log(`[MapPack] keyword:"${keyword}" location:"${locationName}" lead:"${leadName}" placeId:"${leadPlaceId}"`);
-  let items: any[] = [];
-  let dataSource = "dataforseo";
-
-  // ── SQLite cache (24-hour TTL) ─────────────────────────────────────────────
   const cached: any = db.prepare(
     `SELECT items_json FROM mappack_cache WHERE keyword=? AND city=? AND state=? AND fetched_at>datetime('now','-24 hours')`
-  ).get(keyword, city, state);
+  ).get(cacheKey, city, state);
+
   if (cached) {
-    console.log(`[MapPack] Cache hit: "${keyword}" @ ${city}`);
-    items = JSON.parse(cached.items_json);
-    dataSource = "dataforseo_cached";
-  }
-
-  // ── DataForSEO live/advanced ───────────────────────────────────────────────
-  if (!items.length) {
-    try {
-      const res = await fetchT("https://api.dataforseo.com/v3/serp/google/maps/live/advanced", {
-        method: "POST",
-        headers: { Authorization: `Basic ${dfsAuth()}`, "Content-Type": "application/json" },
-        body: JSON.stringify([{
-          keyword,
-          location_name: locationName,
-          language_code: languageCode,
-          limit: resultLimit,
-        }]),
-      });
-      const json = await res.json();
-      const statusCode = json.tasks?.[0]?.status_code;
-      if (statusCode === 40200) {
-        console.error(`[MapPack] DataForSEO balance is zero — add credits at app.dataforseo.com`);
+    places = JSON.parse(cached.items_json);
+    dataSource = 'cached';
+    console.log(`[MapPack] Cache hit: "${keyword}" @ ${city} (${places.length} results)`);
+  } else {
+    const dfsResults = await searchDataForSEOMaps(query, city, state);
+    if (dfsResults && dfsResults.length > 0) {
+      places     = dfsResults;
+      dataSource = 'dataforseo_maps';
+    } else {
+      console.log(`[MapPack] DFS Maps returned no results for "${query}" — falling back to Google Places`);
+      const cityCoords = await geocodeCity(city, state);
+      places = await searchGooglePlaces(query, cityCoords ?? undefined);
+      if (!places.length) {
+        console.error(`[MapPack] Google Places also returned 0 results for "${query}" @ ${city},${state}. Check GOOGLE_PLACES_API_KEY quota.`);
         return null;
       }
-      if (statusCode !== 20000) {
-        console.error(`[MapPack] DataForSEO error ${statusCode}:`, json.tasks?.[0]?.status_message);
-        return null;
-      }
-      const allItems: any[] = json.tasks?.[0]?.result?.[0]?.items || [];
-      items = allItems.filter((i: any) => i.type === "maps_search");
-      if (items.length) {
-        db.prepare(
-          `INSERT OR REPLACE INTO mappack_cache (keyword, city, state, items_json) VALUES (?,?,?,?)`
-        ).run(keyword, city, state, JSON.stringify(items));
-        console.log(`[MapPack] DataForSEO: ${items.length} organic results for "${keyword}" @ ${city} — cached`);
-        items.forEach((i: any) =>
-          console.log(`  #${i.rank_group} "${i.title}" reviews:${i.rating?.votes_count ?? 0} place_id:${i.place_id ?? 'none'}`)
-        );
-      }
-    } catch (e: any) {
-      console.error("[MapPack] DataForSEO request failed:", e.message);
-      return null;
+      dataSource = 'google_places';
+      console.log(`[MapPack] Google Places: ${places.length} results for "${query}"`);
+      places.forEach((p, i) =>
+        console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total ?? 0} place_id:${p.place_id ?? 'none'}`)
+      );
     }
+    db.prepare(
+      `INSERT OR REPLACE INTO mappack_cache (keyword, city, state, items_json) VALUES (?,?,?,?)`
+    ).run(cacheKey, city, state, JSON.stringify(places));
   }
 
-  if (!items.length) {
-    console.error(`[MapPack] DataForSEO returned 0 organic results for "${keyword}" @ ${city}`);
+  // ── Find lead ──────────────────────────────────────────────────────────────
+  // Pass 1: exact place_id match — zero ambiguity
+  let leadIdx = -1;
+  if (leadPlaceId) {
+    leadIdx = places.findIndex((p: any) => p.place_id === leadPlaceId);
+    if (leadIdx !== -1)
+      console.log(`[MapPack] ✓ Lead by place_id: #${leadIdx + 1} "${places[leadIdx].name}"`);
+    else
+      console.warn(`[MapPack] ✗ Lead place_id "${leadPlaceId}" not in top-${places.length} Places results`);
+  }
+
+  // Pass 2: fallback scoring (name words + review count)
+  if (leadIdx === -1) {
+    const leadWords = leadName.toLowerCase().replace(/[-.']/g, ' ').split(' ').filter((w: string) => w.length > 3);
+    let bestScore = 0;
+    for (let i = 0; i < places.length; i++) {
+      const t  = (places[i].name ?? '').toLowerCase();
+      const rv = places[i].user_ratings_total ?? 0;
+      let score = 0;
+      if (leadWords.some((w: string) => t.includes(w)))           score += 40;
+      if (leadReviewCount > 0 && rv === leadReviewCount)           score += 80;
+      if (score > bestScore) { bestScore = score; leadIdx = i; }
+    }
+    if (leadIdx !== -1)
+      console.log(`[MapPack] ✓ Lead by fallback: #${leadIdx + 1} "${places[leadIdx].name}" score=${bestScore}`);
+    else
+      console.warn(`[MapPack] ✗ Lead not found for "${keyword}" @ ${city}`);
+  }
+
+  const leadPos         = leadIdx !== -1
+    ? ((places[leadIdx] as any).rank_group ?? leadIdx + 1)
+    : leadPositionHint;
+  const leadPlaceResult = leadIdx !== -1 ? places[leadIdx] : null;
+
+  // ── Find competitor ────────────────────────────────────────────────────────
+  const targetRank  = pickCompetitorRank(leadPos);
+  console.log(`[MapPack] Lead #${leadPos} → competitor target rank #${targetRank}`);
+
+  const isExcluded = (p: any) =>
+    excludedBrands.some(b => (p.name ?? '').toLowerCase().includes(b.toLowerCase()));
+
+  let compIdx     = -1;
+  let validCount  = 0;
+  let lastValidIdx = -1;
+
+  for (let i = 0; i < places.length; i++) {
+    if (leadPlaceId && places[i].place_id === leadPlaceId) continue;
+    if (!leadPlaceId && leadPlaceResult && places[i] === leadPlaceResult) continue;
+    if (isExcluded(places[i])) {
+      console.log(`[MapPack]   skip excluded "${places[i].name}"`);
+      continue;
+    }
+    validCount++;
+    lastValidIdx = i;
+    if (validCount === targetRank) { compIdx = i; break; }
+  }
+
+  if (compIdx === -1 && lastValidIdx !== -1) {
+    compIdx = lastValidIdx;
+    console.log(`[MapPack] Fewer than ${targetRank} valid competitors — using last valid #${compIdx + 1}`);
+  }
+
+  if (compIdx === -1) {
+    console.error(`[MapPack] No competitor found in Places results for "${query}"`);
     return null;
   }
 
-  // ── Lead matching ──────────────────────────────────────────────────────────
-  // Strategy: place_id first — it is globally unique, zero ambiguity.
-  // Fallback scoring runs only when DataForSEO omits place_id on a result.
-  // Substring/token matching is intentionally absent: fragments of "ElectricMan"
-  // ("electr", "ectric" …) would match every other electrical company in the pack
-  // and produce false positions.
+  const compPlace = places[compIdx];
+  const compPos   = (compPlace as any).rank_group ?? compIdx + 1;
 
-  let leadItem: any = null;
-
-  // Pass 1 — definitive: exact place_id match
-  if (leadPlaceId) {
-    leadItem = items.find((i: any) => i.place_id && i.place_id === leadPlaceId) ?? null;
-    if (leadItem)
-      console.log(`[MapPack] ✓ Lead by place_id: #${leadItem.rank_group} "${leadItem.title}"`);
-    else
-      console.warn(`[MapPack] ✗ place_id "${leadPlaceId}" not in top-${items.length} results for "${keyword}"`);
-  }
-
-  // Pass 2 — fallback scoring (no token/substring matching)
-  if (!leadItem) {
-    const leadWords = leadName.toLowerCase().replace(/[-.']/g, ' ').split(' ').filter((w: string) => w.length > 3);
-    const domainKey = leadName.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-    const scored = items.map((i: any) => {
-      const t  = i.title?.toLowerCase() ?? '';
-      const d  = (i.domain ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const rv = i.rating?.votes_count ?? 0;
-      let score = 0;
-      let reason = '';
-      // Domain match — specific (full domain slug, not a fragment)
-      if (d && (d.includes(domainKey) || domainKey.includes(d.replace(/\.com$/, '')))) { score += 100; reason += 'domain '; }
-      // Exact review count — reliable when counts align precisely
-      if (leadReviewCount > 0 && rv === leadReviewCount) { score += 80; reason += `reviews(${rv}) `; }
-      // Whole business-name word — "electricman" only matches businesses literally named "electricman"
-      if (leadWords.some((w: string) => t.includes(w))) { score += 40; reason += 'name '; }
-      if (score > 0) console.log(`  [Fallback match] #${i.rank_group} "${i.title}" score=${score} (${reason.trim()})`);
-      return { item: i, score };
-    }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
-
-    leadItem = scored[0]?.item ?? null;
-    if (leadItem)
-      console.log(`[MapPack] ✓ Lead by fallback scoring: #${leadItem.rank_group} "${leadItem.title}" (score=${scored[0].score})`);
-    else
-      console.warn(`[MapPack] ✗ Lead not found. Not ranked in top ${items.length} for "${keyword}". Pack: ${items.slice(0, 10).map(i => `#${i.rank_group}:${i.title}`).join(', ')}`);
-  }
-
-  const leadPos = leadItem?.rank_group ?? leadPositionHint;
-
-  // ── Competitor selection ───────────────────────────────────────────────────
-  const compRule = compRules.find(row => leadPos <= row.maxLeadPos) ?? compRules[compRules.length - 1];
-  console.log(`[MapPack] Comp rule: ${compRule.label} (lead=#${leadPos})`);
-
-  const isValidComp = (i: any): boolean =>
-    !!i.title &&
-    !excludedBrands.some(b => i.title.toLowerCase().includes(b)) &&
-    i.rank_group !== leadPos;
-
-  // "Strong enough" = has at least 10 reviews — filters out new/inactive listings.
-  // Does NOT require more reviews than the lead; just not an empty profile.
-  const isStrong = (i: any): boolean => (i.rating?.votes_count ?? 0) >= 10;
-
-  const validAbove = items.filter(i => isValidComp(i) && i.rank_group < leadPos);
-  const validBelow = items.filter(i => isValidComp(i) && i.rank_group > leadPos);
-
-  const rev = (i: any): number => i.rating?.votes_count ?? 0;
-
-  let selected: any;
-  if (validAbove.length > 0) {
-    // Normal: lead is not #1 — apply positional rule then quality check.
-    selected =
-      validAbove.find(i => i.rank_group === compRule.targetPos   && isStrong(i)) ??
-      validAbove.find(i => i.rank_group === compRule.fallbackPos && isStrong(i)) ??
-      validAbove.filter(isStrong).sort((a, b) => a.rank_group - b.rank_group)[0] ??
-      validAbove.sort((a, b) => a.rank_group - b.rank_group)[0];
-  } else {
-    // Lead is at #1. Pick the most established competitor in the pack
-    // (highest review count from top 10 below) — not just the nearest position.
-    // A business with 50 reviews at #2 is less meaningful than one at #4 with 900.
-    const nearPack = validBelow.slice(0, 10);
-    selected =
-      nearPack.filter(isStrong).sort((a, b) => rev(b) - rev(a))[0] ??
-      nearPack.sort((a, b) => rev(b) - rev(a))[0];
-  }
-
-  if (!selected) return null;
-
-  console.log(`[MapPack] ✓ Competitor: #${selected.rank_group} "${selected.title}" ` +
-    `reviews:${selected.rating?.votes_count ?? 0} rating:${selected.rating?.value ?? 0} strong:${isStrong(selected)}`);
-
-  if (!selected.domain && selected.place_id) {
+  // Get competitor website via Places Details (only for primary keyword)
+  let compDomain = '';
+  if (!_skipCompetitor && compPlace.place_id) {
     try {
-      const r    = await fetchT(`https://maps.googleapis.com/maps/api/place/details/json?place_id=${selected.place_id}&fields=website&key=${process.env.GOOGLE_PLACES_API_KEY}`);
-      const json = await r.json();
-      if (json.result?.website) selected.domain = new URL(json.result.website).hostname.replace('www.', '');
+      const dr = await fetchT(
+        `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(compPlace.place_id)}&fields=website&key=${process.env.GOOGLE_PLACES_API_KEY}`
+      );
+      const dj = await dr.json();
+      if (dj.result?.website) compDomain = new URL(dj.result.website).hostname.replace('www.', '');
     } catch { }
   }
 
-  const selectedRank = selected.rank_group;
-  const top3 = items
-    .filter((i: any) => i.rank_group !== leadPos && i.rank_group !== selectedRank)
-    .slice(0, 3);
-  const toGbpUrl = (pid: string | undefined) =>
-    pid ? `https://www.google.com/maps/place/?q=place_id:${pid}` : null;
+  const toGbpUrl = (pid: string) => `https://www.google.com/maps/place/?q=place_id:${pid}`;
 
-  const fullPack = [...top3, selected, ...(leadItem ? [leadItem] : [])]
-    .sort((a, b) => a.rank_group - b.rank_group)
-    .map((i: any) => ({
-      position:     i.rank_group,
-      name:         i.title,
-      rating:       i.rating?.value ?? 0,
-      review_count: i.rating?.votes_count ?? 0,
-      place_id:     i.place_id ?? null,
-      gbp_url:      toGbpUrl(i.place_id),
-      isLead:       i.rank_group === leadPos,
-      isCompetitor: i.rank_group === selectedRank,
-    }));
+  console.log(`[MapPack] ✓ Competitor #${compPos}: "${compPlace.name}" reviews:${compPlace.user_ratings_total ?? 0} rating:${compPlace.rating ?? 0}`);
 
-  return {
-    leadPosition: leadPos,
-    fullPack,
-    dataSource,
-    competitor: {
-      name:         selected.title,
-      rating:       selected.rating?.value ?? 0,
-      review_count: selected.rating?.votes_count ?? 0,
-      position:     selected.rank_group,
-      domain:       selected.domain ?? "",
-      place_id:     selected.place_id ?? "",
-      gbp_url:      toGbpUrl(selected.place_id),
-    },
+  // ── Build fullPack (exactly 5 entries) ────────────────────────────────────
+  // Always include lead + competitor so the report can tag ← YOU and ← THEM.
+  // Fill remaining slots from the top of the Places ranked list.
+  const mustPids = new Set<string>([
+    ...(leadPlaceResult?.place_id ? [leadPlaceResult.place_id as string] : []),
+    ...(compPlace.place_id        ? [compPlace.place_id        as string] : []),
+  ]);
+  const mustItems: any[] = [];
+  const seenPid = new Set<string>();
+  for (const p of [leadPlaceResult, compPlace]) {
+    if (!p || !p.place_id || seenPid.has(p.place_id)) continue;
+    seenPid.add(p.place_id);
+    mustItems.push(p);
+  }
+  const fillers = places
+    .filter((p: any) => !mustPids.has(p.place_id))
+    .slice(0, Math.max(0, 5 - mustItems.length));
+
+  const packPlaces = [...mustItems, ...fillers].sort((a: any, b: any) => {
+    return places.indexOf(a) - places.indexOf(b);
+  });
+
+  const leadActualPid = leadPlaceResult?.place_id ?? leadPlaceId;
+
+  const fullPack = packPlaces.map((place: any) => {
+    const pos = (place as any).rank_group ?? (places.indexOf(place) + 1);
+    return {
+      position:     pos,
+      name:         place.name ?? '',
+      rating:       place.rating ?? 0,
+      review_count: place.user_ratings_total ?? 0,
+      place_id:     place.place_id ?? null,
+      gbp_url:      place.place_id ? toGbpUrl(place.place_id) : null,
+      isLead:       !!leadActualPid && place.place_id === leadActualPid,
+      isCompetitor: !!compPlace.place_id && place.place_id === compPlace.place_id,
+    };
+  });
+
+  const competitor = {
+    name:         compPlace.name ?? '',
+    rating:       compPlace.rating ?? 0,
+    review_count: compPlace.user_ratings_total ?? 0,
+    position:     compPos,
+    domain:       compDomain,
+    place_id:     compPlace.place_id ?? '',
+    gbp_url:      compPlace.place_id ? toGbpUrl(compPlace.place_id) : null,
   };
+
+  return { leadPosition: leadPos, fullPack, dataSource, competitor };
 }
 
-// ─── Multi-keyword Weighted Position ──────────────────────────────────────────
+// ─── Multi-keyword Position ──────────────────────────────────────────────────
 
 export type MapPackResult = NonNullable<Awaited<ReturnType<typeof getLocalMapPack>>>;
 
@@ -306,38 +354,87 @@ export async function getWeightedPosition(
   rankingKeywords: Array<{ keyword: string; position: number | null }>;
 } | null> {
   const keywords = getBuyerIntentKeywords(vertical);
-  console.log(`[Weighted] Searching ${keywords.length} keywords for "${vertical}" @ ${city}: ${keywords.join(', ')}`);
+  console.log(`[MapPack] Searching ${keywords.length} keywords for "${vertical}" @ ${city}: ${keywords.join(', ')}`);
 
   const results = await Promise.all(
-    keywords.map(kw =>
-      getLocalMapPack(vertical, city, state, leadName, 99, leadReviewCount, leadPlaceId, leadRating, kw, config)
+    keywords.map((kw, idx) =>
+      getLocalMapPack(
+        vertical, city, state, leadName, 99, leadReviewCount, leadPlaceId, leadRating, kw,
+        { ...config, _skipCompetitor: idx > 0 },
+      )
         .then(data => ({ keyword: kw, data }))
-        .catch(() => ({ keyword: kw, data: null }))
+        .catch((err: any) => {
+          console.error(`[MapPack] getLocalMapPack threw for "${kw}":`, err?.message ?? err);
+          return { keyword: kw, data: null };
+        })
     )
   );
 
   const primary = results[0];
   if (!primary?.data) {
-    console.warn('[Weighted] Primary keyword returned no data');
+    console.warn('[MapPack] Primary keyword returned no data');
     return null;
   }
 
-  const found = results
-    .map(r => ({ keyword: r.keyword, position: r.data?.leadPosition ?? null }))
-    .filter(x => x.position !== null && x.position < 99);
-
-  const avgPosition = found.length > 0
-    ? Math.round(found.reduce((sum, x) => sum + x.position!, 0) / found.length)
-    : primary.data.leadPosition;
+  const weightedPosition = primary.data.leadPosition;
 
   const rankingKeywords = results.map(r => ({
     keyword:  r.keyword,
     position: r.data?.leadPosition ?? null,
   }));
 
-  console.log(`[Weighted] Positions: ${rankingKeywords.map(x => `"${x.keyword}":#${x.position ?? 'N/F'}`).join(' | ')} → avg #${avgPosition}`);
+  console.log(`[MapPack] Position: #${weightedPosition} (Google Places rank) | all: ${rankingKeywords.map(x => `"${x.keyword}":#${x.position ?? 'N/F'}`).join(' | ')}`);
 
-  return { primaryMapData: primary.data, weightedPosition: avgPosition, rankingKeywords };
+  return { primaryMapData: primary.data, weightedPosition, rankingKeywords };
 }
 
-export { buildLocationName };
+// ─── Organic Search Position ─────────────────────────────────────────────────
+// Uses DFS SERP Google Organic to find the lead's position in regular (non-maps)
+// Google search results for the primary keyword — e.g. "hvac in Toledo".
+
+export async function getOrganicPosition(
+  domain: string,
+  keyword: string,
+  city: string,
+  state: string,
+): Promise<number | null> {
+  if (!process.env.DATAFORSEO_LOGIN) return null;
+  try {
+    const fullState = await resolveStateName(city, state);
+    const res = await fetchT(
+      'https://api.dataforseo.com/v3/serp/google/organic/live/advanced',
+      {
+        method:  'POST',
+        headers: { Authorization: `Basic ${dfsAuth()}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify([{
+          keyword,
+          location_name: `${city},${fullState},United States`,
+          language_name: 'English',
+          depth: 10,
+        }]),
+      },
+      30000,
+    );
+    const json  = await res.json();
+    const task0 = json.tasks?.[0];
+    if (task0?.status_code !== 20000) {
+      console.warn(`[Organic] DFS status ${task0?.status_code}: ${task0?.status_message} for "${keyword}"`);
+      return null;
+    }
+    const items: any[] = task0?.result?.[0]?.items ?? [];
+    const cleanDomain = domain.replace(/^www\./, '').toLowerCase();
+    const hit = items.find((i: any) =>
+      (i.domain ?? '').replace(/^www\./, '').toLowerCase() === cleanDomain ||
+      (i.url ?? '').toLowerCase().includes(cleanDomain)
+    );
+    if (hit) {
+      console.log(`[Organic] "${cleanDomain}" → organic #${hit.rank_absolute} for "${keyword}"`);
+      return hit.rank_absolute ?? null;
+    }
+    console.log(`[Organic] "${cleanDomain}" not in top-10 organic for "${keyword}"`);
+    return null;
+  } catch (e: any) {
+    console.warn('[Organic] error:', e.message);
+    return null;
+  }
+}

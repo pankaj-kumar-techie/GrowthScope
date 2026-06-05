@@ -16,3 +16,23 @@ export function normalizeUrl(raw: string): string {
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return `https://${trimmed}`;
 }
+
+/** Lightweight page text fetch — strips HTML tags, no Puppeteer. Returns empty string on failure. */
+export async function fetchPageText(url: string): Promise<string> {
+  try {
+    const res = await fetchT(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARMA-Audit/1.0)' },
+    }, 12000);
+    if (!res.ok) return '';
+    const html = await res.text();
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 6000);
+  } catch {
+    return '';
+  }
+}

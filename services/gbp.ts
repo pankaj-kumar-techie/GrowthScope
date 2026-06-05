@@ -11,20 +11,26 @@ export async function getLeadGBP(name: string, city: string, state: string, doma
     return host === cleanDomain;
   };
 
-  const fetchDetails = async (place_id: string): Promise<{ website: string; city: string; state: string }> => {
+  const fetchDetails = async (place_id: string): Promise<{ website: string; city: string; state: string; phone: string; address: string }> => {
     try {
-      const r = await fetchT(`https://maps.googleapis.com/maps/api/place/details/json?place_id=${place_id}&fields=website,address_components&key=${process.env.GOOGLE_PLACES_API_KEY}`);
+      const r = await fetchT(`https://maps.googleapis.com/maps/api/place/details/json?place_id=${place_id}&fields=website,address_components,formatted_phone_number,formatted_address&key=${process.env.GOOGLE_PLACES_API_KEY}`);
       const j = await r.json();
       const comps: any[] = j.result?.address_components ?? [];
       const city  = comps.find((c: any) => c.types.includes('locality'))?.long_name ?? '';
       const state = comps.find((c: any) => c.types.includes('administrative_area_level_1'))?.long_name ?? '';
-      return { website: j.result?.website ?? '', city, state };
-    } catch { return { website: '', city: '', state: '' }; }
+      return {
+        website: j.result?.website ?? '',
+        city,
+        state,
+        phone:   j.result?.formatted_phone_number ?? '',
+        address: j.result?.formatted_address ?? '',
+      };
+    } catch { return { website: '', city: '', state: '', phone: '', address: '' }; }
   };
 
   const trySearch = async (query: string): Promise<{
     rating: number; review_count: number; place_id: string; real_name: string;
-    gbp_city: string; gbp_state: string;
+    gbp_city: string; gbp_state: string; phone: string; address: string;
   } | null> => {
     try {
       const q = encodeURIComponent(query);
@@ -35,14 +41,16 @@ export async function getLeadGBP(name: string, city: string, state: string, doma
       for (const place of json.results.slice(0, 3)) {
         const details = await fetchDetails(place.place_id);
         if (siteMatchesDomain(details.website)) {
-          console.log(`[GBP] ✓ "${place.name}" website="${details.website}" city="${details.city}" state="${details.state}"`);
+          console.log(`[GBP] ✓ "${place.name}" phone="${details.phone}" city="${details.city}" state="${details.state}"`);
           return {
-            rating: place.rating ?? 0,
+            rating:       place.rating ?? 0,
             review_count: place.user_ratings_total ?? 0,
-            place_id: place.place_id ?? "",
-            real_name: place.name ?? "",
-            gbp_city: details.city,
-            gbp_state: details.state,
+            place_id:     place.place_id ?? "",
+            real_name:    place.name ?? "",
+            gbp_city:     details.city,
+            gbp_state:    details.state,
+            phone:        details.phone,
+            address:      details.address,
           };
         }
         console.log(`[GBP]   skip "${place.name}" website="${details.website}"`);
@@ -51,7 +59,7 @@ export async function getLeadGBP(name: string, city: string, state: string, doma
     } catch (e: any) { console.warn('[GBP] search error:', e.message); return null; }
   };
 
-  const empty = { rating: 0, review_count: 0, place_id: "", real_name: "", gbp_city: "", gbp_state: "" };
+  const empty = { rating: 0, review_count: 0, place_id: "", real_name: "", gbp_city: "", gbp_state: "", phone: "", address: "" };
 
   if (cleanDomain) {
     const r = await trySearch(`${cleanDomain} ${city} ${state}`);
@@ -70,13 +78,31 @@ export async function getLeadGBP(name: string, city: string, state: string, doma
     const json = await res.json();
     if (json.status !== "OK" || !json.results?.length) return empty;
     const p = json.results[0];
-    return { rating: p.rating ?? 0, review_count: p.user_ratings_total ?? 0, place_id: p.place_id ?? "", real_name: p.name ?? "", gbp_city: '', gbp_state: '' };
+    const details = await fetchDetails(p.place_id);
+    return {
+      rating: p.rating ?? 0, review_count: p.user_ratings_total ?? 0,
+      place_id: p.place_id ?? "", real_name: p.name ?? "",
+      gbp_city: '', gbp_state: '',
+      phone: details.phone, address: details.address,
+    };
   } catch { return empty; }
 }
 
 // Resolve a 2-letter state abbreviation to a full name using the Geocoding API.
 // Returns the input unchanged if it's already a full name or if the API call fails.
-async function resolveStateName(city: string, state: string): Promise<string> {
+/** Fetch phone number for any place_id — used to get competitor phone from Places Details. */
+export async function getPlacePhone(place_id: string): Promise<string> {
+  if (!place_id || !process.env.GOOGLE_PLACES_API_KEY) return '';
+  try {
+    const r = await fetchT(
+      `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(place_id)}&fields=formatted_phone_number&key=${process.env.GOOGLE_PLACES_API_KEY}`
+    );
+    const j = await r.json();
+    return j.result?.formatted_phone_number ?? '';
+  } catch { return ''; }
+}
+
+export async function resolveStateName(city: string, state: string): Promise<string> {
   if (!/^[A-Z]{2}$/i.test(state.trim())) return state; // already a full name
   try {
     const q = encodeURIComponent(`${city}, ${state}, United States`);
@@ -358,4 +384,18 @@ export async function getGBPPostsPerWeek(
     console.warn('[GBP] Could not fetch GBP posts:', e.message);
     return null;
   }
+}
+
+export async function getPlaceCoords(place_id: string): Promise<{ lat: number; lng: number } | null> {
+  if (!place_id || !process.env.GOOGLE_PLACES_API_KEY) return null;
+  try {
+    const r = await fetchT(
+      `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(place_id)}&fields=geometry&key=${process.env.GOOGLE_PLACES_API_KEY}`,
+      {}, 8000
+    );
+    const j = await r.json();
+    const loc = j.result?.geometry?.location;
+    if (loc) console.log(`[GBP] Coords for ${place_id}: ${loc.lat},${loc.lng}`);
+    return loc ? { lat: loc.lat as number, lng: loc.lng as number } : null;
+  } catch { return null; }
 }

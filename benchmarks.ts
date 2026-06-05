@@ -40,7 +40,7 @@ export const INDUSTRY_BENCHMARKS: Record<string, NicheBenchmark> = {
 // inputs like "Roofing" still reach the "Roofing Replacement" keyword list.
 export const NICHE_KEYWORDS: Record<string, string[]> = {
   "Plumbing":                        ["plumber", "plumbing service", "emergency plumber"],
-  "HVAC":                            ["hvac contractor", "ac repair", "air conditioning repair"],
+  "HVAC":                            ["hvac", "hvac contractor", "ac repair", "air conditioning repair"],
   "Electrical":                      ["electrician", "electrical contractor", "electrical repair"],
   "Roofing Replacement":             ["roofing contractor", "roofer", "roof repair"],
   "Pest Control":                    ["pest control", "exterminator", "pest exterminator"],

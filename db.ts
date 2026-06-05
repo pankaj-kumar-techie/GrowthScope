@@ -53,10 +53,8 @@ db.exec(`
   );
 `);
 
-// Remove old-format mappack_cache entries where keyword contains a space
-// (old format was "Electrical Dallas Texas"; new format is just "Electrical").
-// Old entries would never be hit by new queries anyway (different cache key),
-// but purging them avoids confusion and frees space.
-db.prepare(`DELETE FROM mappack_cache WHERE keyword LIKE '% %'`).run();
+// Remove old-format mappack_cache entries (format was "Electrical Dallas Texas"; 3+ words).
+// Single or two-word keywords like "hvac contractor" are valid and must not be deleted.
+db.prepare(`DELETE FROM mappack_cache WHERE keyword LIKE '% % %'`).run();
 
 export default db;

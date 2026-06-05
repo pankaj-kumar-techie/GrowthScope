@@ -1,73 +1,89 @@
 import { Router, Request, Response } from 'express';
 import { asyncHandler, fetchT } from '../lib/http';
-import { dfsAuth } from '../lib/auth';
 import { getPageSpeed } from '../services/pagespeed';
-import { buildLocationName } from '../services/mappack';
 import db from '../db';
 
 const router = Router();
 
-// Live map pack debug — verify DataForSEO positions against Google Maps manually
-// Usage: GET /mappack-debug?vertical=Roofing&city=Anchorage&state=Alaska
-// Optional: &country=Canada  &language=en  &bust=1
+// Live map pack debug — shows Google Places rankings so you can verify against Google Maps manually
+// Usage: GET /mappack-debug?vertical=Roofing&city=Anchorage&state=AK
+// Optional: &bust=1  (clears the 24h cache and fetches fresh)
 router.get('/mappack-debug', asyncHandler(async (req: Request, res: Response) => {
-  const { vertical, city, state, country = "United States", language = "en", bust } = req.query as Record<string, string>;
+  const { vertical, city, state, bust } = req.query as Record<string, string>;
   if (!vertical || !city || !state) return res.status(400).json({ error: 'vertical, city, state required' });
 
-  const keyword      = vertical;
-  const locationName = buildLocationName(city, state, country);
+  if (!process.env.GOOGLE_PLACES_API_KEY) {
+    return res.status(500).json({ error: 'GOOGLE_PLACES_API_KEY not set' });
+  }
+
+  const keyword = vertical;
+  const query   = `${keyword} ${city} ${state}`;
 
   if (bust === '1') {
     db.prepare('DELETE FROM mappack_cache WHERE keyword=? AND city=? AND state=?').run(keyword, city, state);
-    console.log(`[Debug] Cache cleared for keyword="${keyword}" location="${locationName}"`);
+    console.log(`[Debug] Cache cleared for "${keyword}" @ ${city}`);
   }
 
-  let items: any[] = [];
-  let source = 'cache';
+  let places: any[] = [];
+  let source = 'google_places_cached';
 
   const cached: any = db.prepare(
     `SELECT items_json, fetched_at FROM mappack_cache WHERE keyword=? AND city=? AND state=? AND fetched_at>datetime('now','-24 hours')`
   ).get(keyword, city, state);
 
   if (cached) {
-    items = JSON.parse(cached.items_json);
-    source = `dataforseo_cached (fetched ${cached.fetched_at})`;
+    places = JSON.parse(cached.items_json);
+    source  = `google_places_cached (fetched ${cached.fetched_at})`;
   } else {
-    source = 'dataforseo_live';
-    const r = await fetchT("https://api.dataforseo.com/v3/serp/google/maps/live/advanced", {
-      method: "POST",
-      headers: { Authorization: `Basic ${dfsAuth()}`, "Content-Type": "application/json" },
-      body: JSON.stringify([{ keyword, location_name: locationName, language_code: language, limit: 20 }]),
-    });
-    const json = await r.json();
-    const statusCode = json.tasks?.[0]?.status_code;
-    if (statusCode === 40200) return res.status(402).json({ error: 'DataForSEO balance is zero — top up at app.dataforseo.com', keyword, location: locationName });
-    if (statusCode !== 20000) return res.status(502).json({ error: `DataForSEO error ${statusCode}: ${json.tasks?.[0]?.status_message}`, keyword, location: locationName });
-    const allItems = json.tasks?.[0]?.result?.[0]?.items || [];
-    items = allItems.filter((i: any) => i.type === "maps_search");
-    if (items.length) db.prepare('INSERT OR REPLACE INTO mappack_cache (keyword,city,state,items_json) VALUES (?,?,?,?)').run(keyword, city, state, JSON.stringify(items));
+    source = 'google_places_live';
+    const allResults: any[] = [];
+    let pageToken: string | undefined;
+
+    for (let page = 0; page < 3; page++) {
+      if (page > 0 && !pageToken) break;
+      if (page > 0) await new Promise(r => setTimeout(r, 2000));
+      try {
+        let url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${process.env.GOOGLE_PLACES_API_KEY}`;
+        if (pageToken) url += `&pagetoken=${pageToken}`;
+        const httpRes  = await fetchT(url, {}, 15000);
+        const json     = await httpRes.json();
+        if (json.status === 'ZERO_RESULTS') break;
+        if (json.status !== 'OK') {
+          return res.status(502).json({ error: `Places API status="${json.status}"`, query });
+        }
+        allResults.push(...(json.results ?? []));
+        pageToken = json.next_page_token;
+        if (!pageToken) break;
+      } catch (e: any) {
+        return res.status(502).json({ error: e.message, query });
+      }
+    }
+
+    places = allResults;
+    if (places.length) {
+      db.prepare('INSERT OR REPLACE INTO mappack_cache (keyword,city,state,items_json) VALUES (?,?,?,?)')
+        .run(keyword, city, state, JSON.stringify(places));
+    }
   }
 
   res.json({
-    keyword,
-    location: locationName,
+    query,
     source,
-    how_to_verify: `Open Google Maps, set location to ${city} ${state}, search "${keyword}" — rank numbers should match.`,
-    count: items.length,
-    positions: items.map((i: any) => ({
-      rank: i.rank_group,
-      name: i.title,
-      rating: i.rating?.value ?? 0,
-      reviews: i.rating?.votes_count ?? 0,
-      place_id: i.place_id ?? null,
-      domain: i.domain ?? null,
+    how_to_verify: `Search "${query}" on Google Maps — rank numbers below should match the order shown.`,
+    count: places.length,
+    positions: places.map((p: any, i: number) => ({
+      rank:      i + 1,
+      name:      p.name,
+      rating:    p.rating ?? 0,
+      reviews:   p.user_ratings_total ?? 0,
+      place_id:  p.place_id ?? null,
+      maps_url:  p.place_id ? `https://www.google.com/maps/place/?q=place_id:${p.place_id}` : null,
     })),
   });
 }));
 
 // Live PageSpeed check — bypasses cache
 // Usage: GET /pagespeed-check?url=https://example.com
-// Optional: &strategy=desktop &bust=1
 router.get('/pagespeed-check', asyncHandler(async (req: Request, res: Response) => {
   const { url, strategy = 'mobile', bust } = req.query as Record<string, string>;
   if (!url) return res.status(400).json({ error: 'url required. Example: /pagespeed-check?url=https://example.com' });
@@ -81,7 +97,7 @@ router.get('/pagespeed-check', asyncHandler(async (req: Request, res: Response) 
   res.json({
     url,
     tested_at: new Date().toISOString(),
-    mobile: { score: mobile.score, lcp: mobile.lcp, cls: mobile.cls, is_fallback: mobile.is_fallback, cached: mobile.cached },
+    mobile:  { score: mobile.score,  lcp: mobile.lcp,  cls: mobile.cls,  is_fallback: mobile.is_fallback,  cached: mobile.cached  },
     desktop: { score: desktop.score, lcp: desktop.lcp, cls: desktop.cls, is_fallback: desktop.is_fallback, cached: desktop.cached },
     note: mobile.is_fallback || desktop.is_fallback
       ? 'One or more scores could not be fetched from the API. Check server logs for the specific error.'
@@ -90,8 +106,8 @@ router.get('/pagespeed-check', asyncHandler(async (req: Request, res: Response) 
 }));
 
 router.get('/health', (_req: Request, res: Response) => {
-  const leads = (db.prepare('SELECT COUNT(*) as c FROM leads').get() as any).c;
-  const cached = (db.prepare('SELECT COUNT(*) as c FROM mappack_cache WHERE fetched_at>datetime(\'now\',\'-24 hours\')').get() as any).c;
+  const leads  = (db.prepare('SELECT COUNT(*) as c FROM leads').get() as any).c;
+  const cached = (db.prepare(`SELECT COUNT(*) as c FROM mappack_cache WHERE fetched_at>datetime('now','-24 hours')`).get() as any).c;
   res.json({ status: 'ok', leads_in_db: leads, mappack_cache_live: cached });
 });
 
