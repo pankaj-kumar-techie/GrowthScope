@@ -1,9 +1,74 @@
 # Lite Checker — Detailed Flow
 
-**Endpoint:** `POST /lite-report`
+**Endpoint:** `POST /lite-report`  
+**Output:** PDF (default) or JSON (`?format=json`)  
+**Time:** ~38 seconds per lead
 
-**Purpose:** Fast lead qualification. Pulls Google Maps ranking, competitor comparison,
-review insights, traffic estimate, and revenue gap. Outputs a short PDF (or JSON).
+---
+
+## Full Data Flow
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "13px", "lineColor": "#64748B", "clusterBkg": "#F8FAFC"}}}%%
+flowchart TD
+    classDef google fill:#DBEAFE,color:#1D4ED8,stroke:#93C5FD,stroke-width:2px
+    classDef dfs    fill:#FFEDD5,color:#C2530A,stroke:#FED7AA,stroke-width:2px
+    classDef ai     fill:#EDE9FE,color:#6D28D9,stroke:#DDD6FE,stroke-width:2px
+    classDef sys    fill:#D1FAE5,color:#065F46,stroke:#6EE7B7,stroke-width:2px
+    classDef out    fill:#FEF3C7,color:#92400E,stroke:#FCD34D,stroke-width:2px
+    classDef inp    fill:#1E293B,color:#F1F5F9,stroke:#475569,stroke-width:2px
+    classDef db     fill:#F1F5F9,color:#475569,stroke:#94A3B8,stroke-width:2px
+
+    IN[/"POST /lite-report\nurl · city · state · vertical"/]:::inp
+
+    subgraph S1["Step 1 — Parallel  ~3 sec"]
+        direction LR
+        GBP["Google Places Text Search\nReturns: real_name · rating · review_count\nplace_id · phone · address · city · state"]:::google
+        TRF["DataForSEO Labs Domain Rank\nReturns: monthly traffic estimate\nFallback: 200 if API returns 0"]:::dfs
+    end
+
+    subgraph S2["Step 2 — Map Pack Rankings  ~10 sec · 3 keywords searched · 24h cache"]
+        PRI["DataForSEO SERP Maps  PRIMARY\nReturns exact Google Maps ranking as\na real user in that city sees it\nAll businesses ranked by rank_group"]:::dfs
+        FAL["Google Places  FALLBACK\nOnly used if DataForSEO is unavailable\nGeocoded to city center · 20km radius\nProminence order ≈ map ranking"]:::google
+        SEL["Competitor Selection Logic\nLead #1 → vs Rank #2\nLead #2–4 → vs Rank #1\nLead #5–8 → vs Rank #3\nLead #9–13 → vs Rank #4\nReturns: fullPack top-5 + competitor object"]:::sys
+        PRI -->|"all ranked businesses"| SEL
+        FAL -. "fallback only" .-> SEL
+    end
+
+    subgraph S3["Step 3 — Parallel Enrichment  ~20 sec · 6 calls fire at the same time"]
+        direction LR
+        REV["DataForSEO Reviews\ntask_post → poll 5s → task_get\n100 reviews · owner_answer field\n→ reply_rate · unanswered_count\nSnippets passed to Claude"]:::dfs
+        PST["DataForSEO GBP Posts\nPosts last 28 days\n→ posts_per_week"]:::dfs
+        LTX["Lead Homepage Fetch\nHTTP GET + HTML strip\n→ visible page text\n~3000 chars to Claude"]:::sys
+        CPH["Google Places Details\nCompetitor place_id\n→ formatted_phone_number"]:::google
+        CTX["Competitor Homepage Fetch\nHTTP GET + strip\n→ page text to Claude"]:::sys
+        ORG["DataForSEO SERP Organic\nNon-map Google ranking\n→ organic position top-10"]:::dfs
+    end
+
+    subgraph S4["Step 4 — Claude Haiku × 3 in parallel  ~5 sec"]
+        direction LR
+        HL["Claude Haiku\nLead page text\n→ owner name\n→ service area cities"]:::ai
+        HC["Claude Haiku\nComp page text\n→ owner name\n→ service area cities"]:::ai
+        HE["Claude Haiku\nAll audit data\n→ email subject line\n→ 3-sentence cold email"]:::ai
+    end
+
+    BM["Industry Benchmarks × Traffic\n26 verticals · CVR% · avg ticket value\ncurrent = traffic × CVR × ticket\nmonthly_loss = potential − current  cap $60k"]:::sys
+    DB[("SQLite — leads table\nSaves lead + competitor fields\nFull Checker reads competitor from here")]:::db
+
+    subgraph OUT["Output"]
+        direction LR
+        PDF[/"Binary PDF\nARMA_LiteCheck_domain.pdf"/]:::out
+        JSN[/"Structured JSON\n?format=json — 25+ fields"/]:::out
+    end
+
+    IN --> S1
+    S1 -->|"place_id · name · traffic"| S2
+    S2 -->|"lead_position · competitor · fullPack"| S3
+    S3 -->|"page_text · review_data · organic_pos"| S4
+    S4 -->|"owner · service_area · cold_email"| BM
+    BM -->|"revenue gap"| DB
+    DB -->|"HTML → Puppeteer"| OUT
+```
 
 ---
 
@@ -11,294 +76,63 @@ review insights, traffic estimate, and revenue gap. Outputs a short PDF (or JSON
 
 ```json
 {
-  "url":      "https://acmeplumbing.com",   // required
-  "city":     "Dallas",                     // required
-  "state":    "TX",                         // required
-  "vertical": "Plumbing"                    // optional — auto-detected from niche list if omitted
+  "url":      "https://acmeplumbing.com",
+  "city":     "Dallas",
+  "state":    "TX",
+  "vertical": "Plumbing"
 }
+```
+
+`vertical` is optional — system auto-detects from page content if omitted.
+
+---
+
+## Competitor Selection Logic
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "13px", "lineColor": "#64748B", "clusterBkg": "#F8FAFC"}}}%%
+flowchart LR
+    classDef sys fill:#D1FAE5,color:#065F46,stroke:#6EE7B7,stroke-width:2px
+    classDef hi  fill:#DBEAFE,color:#1D4ED8,stroke:#93C5FD,stroke-width:2px
+
+    R1["Lead at Rank #1"] --> C1["Compare to Rank #2"]:::hi
+    R2["Lead at Rank #2–4"] --> C2["Compare to Rank #1\n← closest threat above"]:::hi
+    R3["Lead at Rank #5–8"] --> C3["Compare to Rank #3\n← achievable next step"]:::hi
+    R4["Lead at Rank #9–13"] --> C4["Compare to Rank #4"]:::sys
+    R5["Lead at Rank #14+"] --> C5["Compare to Rank #5"]:::sys
 ```
 
 ---
 
-## Step-by-Step Flow
+## JSON Output Fields (all 25+)
 
-### Step 1 — GBP Lookup + Traffic (parallel, ~4s)
+Returned when `?format=json` is added. PDF report contains the same data rendered visually.
 
-```
-POST /lite-report
-        │
-        ├──► Google Places Text Search API
-        │    Query: "acmeplumbing.com Dallas TX"
-        │    Fallback: "Acme Plumbing Dallas TX"
-        │    Verifies match by comparing website field to submitted domain
-        │    ─────────────────────────────────────────────────────────────
-        │    Output:
-        │      real_name:     "Acme Plumbing Co."
-        │      rating:        4.7
-        │      review_count:  134
-        │      place_id:      "ChIJxxxxxx"
-        │      phone:         "(214) 555-0100"
-        │      address:       "123 Main St, Dallas, TX 75201"
-        │      gbp_city:      "Dallas"   ← may differ from submitted city
-        │      gbp_state:     "Texas"
-        │
-        └──► DataForSEO Labs: Domain Rank Overview
-             Target: "acmeplumbing.com"
-             ─────────────────────────────────────
-             Output:
-               traffic_monthly: 420   (estimated organic visits/month)
-               Falls back to 200 if API returns 0 or fails
-```
-
-### Step 2 — Map Pack Rankings (~5–20s)
-
-```
-Using: real_name from Step 1, GBP place_id, review count
-
-3 keyword searches run in parallel:
-  "plumber in Dallas"
-  "plumbing service in Dallas"
-  "emergency plumber in Dallas"
-
-PRIMARY — DataForSEO SERP Maps (live/advanced):
-────────────────────────────────────────────────
-  Returns: exact ranking as a real user in Dallas would see on Google Maps
-  Fields per result: rank_group (#), name, rating, review_count, place_id
-
-FALLBACK — Google Places Text Search:
-──────────────────────────────────────
-  Used when DataForSEO is unavailable
-  Results geocoded to city center (20km radius bias)
-  Result order = Google prominence ≈ map ranking
-
-Finding the lead in results:
-  Pass 1: exact place_id match  (zero ambiguity)
-  Pass 2: name word match + review count score
-
-Competitor selection logic:
-  Lead #1        → compare to #2
-  Lead #2–4      → compare to #1
-  Lead #5–8      → compare to #3
-  Lead #9–13     → compare to #4
-  Lead #14+      → compare to #5
-
-Output:
-  lead.position:          5          (primary keyword rank)
-  ranking_keywords:       [{"keyword":"plumber","position":5}, ...]
-  competitor.name:        "Dallas Pro Plumbing"
-  competitor.position:    3
-  competitor.rating:      4.9
-  competitor.review_count: 312
-  competitor.domain:      "dallasProplumbing.com"
-  fullPack:               [top 5 businesses in map pack]
-  position_data_source:   "dataforseo_maps"   or "google_places"
-
-Cached: yes — 24-hour SQLite cache per keyword+city+state
-```
-
-### Step 3 — Enrichment (parallel, ~20–60s)
-
-```
-6 calls run simultaneously:
-
-1. DataForSEO Business Data: Google Reviews
-   ─────────────────────────────────────────
-   Method: task_post → poll every 5s → task_get  (async job, ~15–60s)
-   Depth: 100 reviews, sorted newest first
-   Returns per review: text, star rating, owner_answer (replied or not)
-
-   Output:
-     replyRate:           0.23  (23% of reviews have owner replies)
-     repliedCount:        7
-     unansweredCount:     23
-     totalChecked:        30
-     avgRecentRating:     4.5
-     snippets:            up to 20 review excerpts with reply status
-
-   Fallback: Google Places API v1 (if DataForSEO unavailable)
-     Note: Places v1 does NOT expose owner reply data
-     In this case: replyDataAvailable=false — report won't claim "no replies"
-
-2. DataForSEO Business Data: GBP Posts
-   ──────────────────────────────────────
-   Returns: posts from last 28 days → gbpPostsPerWeek (e.g. 1.5)
-
-3. Lead Homepage Fetch (HTTP GET)
-   ─────────────────────────────────
-   Strips HTML → raw visible text
-   Passed to Claude for owner name + service area extraction
-
-4. Google Places Details: Competitor Phone
-   ─────────────────────────────────────────
-   Places Details API call for competitor place_id
-   Returns: formatted phone number
-
-5. Competitor Homepage Fetch (HTTP GET)
-   ────────────────────────────────────────
-   Same as #3 for competitor site
-
-6. DataForSEO SERP Organic (live/advanced)
-   ──────────────────────────────────────────
-   Query: "plumber in Dallas" (primary keyword)
-   Returns: position in organic (non-maps) Google results (top 10)
-```
-
-### Step 4 — Claude AI Processing (~5–8s)
-
-```
-3 Claude calls run in parallel:
-
-Claude Haiku — Lead insights
-  Input:  lead homepage text (~3000 chars)
-  Output: { owner: "John Smith", serviceArea: "Dallas, Plano, Frisco" }
-
-Claude Haiku — Competitor insights
-  Input:  competitor homepage text
-  Output: { owner: "Mike Johnson", serviceArea: "Dallas, Irving" }
-
-Claude Haiku — Cold email
-  Input:  lead name, city, position, reviews, competitor name/position, revenue gap
-  Output: { subject: "...", body: "3 sentences" }
-  Rules:  specific numbers, no SEO jargon, soft CTA to get full report
-```
-
-### Step 5 — Revenue Calculation (instant, no API)
-
-```
-Industry benchmarks lookup (26 verticals):
-  Plumbing → CVR: 3.5% | Avg ticket: $1,080
-
-Formula:
-  current_revenue  = traffic × CVR × avg_ticket
-  potential_revenue = traffic × (CVR × 2) × avg_ticket
-  monthly_loss     = potential_revenue - current_revenue   (capped at $60k)
-
-Output:
-  monthly_loss:     $9,072
-  current_revenue:  $15,876
-  potential_revenue:$24,948
-  loss_low_usd:     $6,350   (70% of monthly_loss)
-  loss_high_usd:    $11,793  (130% of monthly_loss)
-```
-
-### Step 6 — Database Save
-
-```
-SQLite table: leads
-Saved fields: domain, real_name, city, state, vertical, map position,
-              competitor (name/domain/place_id/rating/reviews/position),
-              traffic, full lite_report_data as JSON
-
-Purpose: Full Checker reads competitor fields from this row.
-         Ensures both reports use the SAME competitor — no inconsistency.
-```
-
-### Step 7 — Output
-
-```
-Default:
-  HTML → Puppeteer (headless Chrome) → PDF
-  Response: binary PDF, Content-Disposition attachment
-
-JSON mode (?format=json or "format":"json" in body):
-  Returns complete liteReport JSON object (all fields above)
-```
-
----
-
-## Complete Field List (JSON output)
-
-```json
-{
-  "domain":           "acmeplumbing.com",
-  "city":             "Dallas",
-  "state":            "TX",
-  "vertical":         "Plumbing",
-  "niche_matched":    "Plumbing",
-  "search_location":  "Dallas, TX",
-
-  "lead": {
-    "name":                "Acme Plumbing Co.",
-    "rating":              4.7,
-    "review_count":        134,
-    "place_id":            "ChIJxxxxxx",
-    "gbp_url":             "https://www.google.com/maps/place/?q=place_id:ChIJxxxxxx",
-    "position":            5,
-    "organic_position":    8,
-    "position_by_keyword": [
-      { "keyword": "plumber",          "position": 5 },
-      { "keyword": "plumbing service", "position": 6 },
-      { "keyword": "emergency plumber","position": 4 }
-    ],
-    "phone":        "(214) 555-0100",
-    "address":      "123 Main St, Dallas, TX 75201",
-    "owner":        "John Smith",
-    "service_area": "Dallas, Plano, Frisco, McKinney"
-  },
-
-  "competitor": {
-    "name":         "Dallas Pro Plumbing",
-    "rating":       4.9,
-    "review_count": 312,
-    "position":     3,
-    "domain":       "dallasproplumbing.com",
-    "place_id":     "ChIJyyyyyy",
-    "gbp_url":      "https://www.google.com/maps/place/?q=place_id:ChIJyyyyyy",
-    "phone":        "(214) 555-0200",
-    "owner":        "Mike Johnson",
-    "service_area": "Dallas, Irving, Garland"
-  },
-
-  "fullPack": [
-    { "position":1, "name":"Best Plumbing LLC",   "rating":4.8, "review_count":520, "isLead":false, "isCompetitor":false },
-    { "position":2, "name":"Dallas Drain Pros",   "rating":4.6, "review_count":210, "isLead":false, "isCompetitor":false },
-    { "position":3, "name":"Dallas Pro Plumbing", "rating":4.9, "review_count":312, "isLead":false, "isCompetitor":true  },
-    { "position":4, "name":"Quick Fix Plumbing",  "rating":4.5, "review_count": 89, "isLead":false, "isCompetitor":false },
-    { "position":5, "name":"Acme Plumbing Co.",   "rating":4.7, "review_count":134, "isLead":true,  "isCompetitor":false }
-  ],
-
-  "traffic_monthly": 420,
-
-  "revenue": {
-    "niche_matched":    "Plumbing",
-    "cvr_typical":      3.5,
-    "avg_ticket":       1080,
-    "current_revenue":  15876,
-    "potential_revenue":24948,
-    "monthly_loss":     9072,
-    "loss_low_usd":     6350,
-    "loss_high_usd":    11793,
-    "confidence":       "H"
-  },
-
-  "review_insights": {
-    "replyRate":           0.23,
-    "repliedCount":        7,
-    "unansweredCount":     23,
-    "totalChecked":        30,
-    "avgRecentRating":     4.5,
-    "hasUnansweredRecent": true,
-    "replyDataAvailable":  true,
-    "snippets": [
-      "\"Great service, fast response\" (5★ NO REPLY — MISSED OPPORTUNITY)",
-      "\"Fixed our leak same day\" (4★ [Owner replied])",
-      "\"Professional and fair pricing\" (5★ NO REPLY — MISSED OPPORTUNITY)"
-    ]
-  },
-
-  "position_data_source": "dataforseo_maps",
-  "ranking_method":       "exact_google_maps",
-  "ranking_keywords": [
-    { "keyword": "plumber",           "position": 5 },
-    { "keyword": "plumbing service",  "position": 6 },
-    { "keyword": "emergency plumber", "position": 4 }
-  ],
-
-  "gap_summary": "Acme Plumbing Co. at #5 vs Dallas Pro Plumbing at #3 in Dallas (exact Google Maps ranking).",
-
-  "cold_email": {
-    "subject": "Acme Plumbing — 5th on Google Maps while a competitor holds 3rd",
-    "body": "I ran a Google Maps check on Acme Plumbing and found you at #5 while Dallas Pro Plumbing holds #3 — a gap worth roughly $9,072/month in missed calls. I put together a short brief with the numbers (attached). If you'd like the full audit with the exact steps to close that gap, just reply and I'll send it over."
-  }
-}
-```
+| Field | Source | Example |
+|---|---|---|
+| `lead.name` | Google Places | `"Glass City Heating & Air"` |
+| `lead.rating` | Google Places | `4.7` |
+| `lead.review_count` | Google Places | `360` |
+| `lead.position` | DataForSEO SERP Maps | `6` |
+| `lead.organic_position` | DataForSEO SERP Organic | `11` |
+| `lead.phone` | Google Places Details | `"(419) 470-0178"` |
+| `lead.address` | Google Places Details | `"123 Main St, Toledo, OH"` |
+| `lead.owner` | Claude Haiku | `"Perry Keel, Gary Keel"` |
+| `lead.service_area` | Claude Haiku | `"Toledo, Sylvania, Perrysburg"` |
+| `competitor.name` | DataForSEO Maps | `"A-1 Heating & Improvement Co."` |
+| `competitor.position` | DataForSEO Maps | `3` |
+| `competitor.rating` | DataForSEO Maps | `4.2` |
+| `competitor.review_count` | DataForSEO Maps | `227` |
+| `competitor.phone` | Google Places Details | `"(419) 555-0200"` |
+| `competitor.domain` | Google Places Details | `"a1heating.com"` |
+| `competitor.owner` | Claude Haiku | `"Mike Johnson"` |
+| `fullPack[]` | DataForSEO Maps | Top-5 businesses with positions |
+| `ranking_keywords[]` | DataForSEO Maps | Position per keyword searched |
+| `traffic_monthly` | DataForSEO Labs | `420` |
+| `revenue.monthly_loss` | Internal benchmarks | `9072` |
+| `revenue.current_revenue` | Internal benchmarks | `15876` |
+| `review_insights.replyRate` | DataForSEO Reviews | `0.23` |
+| `review_insights.unansweredCount` | DataForSEO Reviews | `23` |
+| `review_insights.snippets[]` | DataForSEO Reviews | 3 excerpts with reply status |
+| `cold_email.subject` | Claude Haiku | `"Glass City — #6 while A-1 holds #3"` |
+| `cold_email.body` | Claude Haiku | 3-sentence outreach email |

@@ -4,9 +4,53 @@ Base URL: `http://localhost:3002` (or your deployed host)
 
 ---
 
-## POST /lite-report
+## Request → Response Flow
 
-Runs the Lite Checker for a lead. Returns a PDF audit report (or JSON if requested).
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "13px", "lineColor": "#64748B", "clusterBkg": "#F8FAFC"}}}%%
+flowchart LR
+    classDef google fill:#DBEAFE,color:#1D4ED8,stroke:#93C5FD,stroke-width:2px
+    classDef dfs    fill:#FFEDD5,color:#C2530A,stroke:#FED7AA,stroke-width:2px
+    classDef ai     fill:#EDE9FE,color:#6D28D9,stroke:#DDD6FE,stroke-width:2px
+    classDef sys    fill:#D1FAE5,color:#065F46,stroke:#6EE7B7,stroke-width:2px
+    classDef out    fill:#FEF3C7,color:#92400E,stroke:#FCD34D,stroke-width:2px
+    classDef inp    fill:#1E293B,color:#F1F5F9,stroke:#475569,stroke-width:2px
+    classDef db     fill:#F1F5F9,color:#475569,stroke:#94A3B8,stroke-width:2px
+    classDef err    fill:#FEE2E2,color:#991B1B,stroke:#FCA5A5,stroke-width:2px
+
+    CLIENT[/"Client\ncurl · Python · any HTTP client"/]:::inp
+
+    subgraph LITE["POST /lite-report  ~38 sec"]
+        L1["Google APIs\nDataForSEO\nClaude Haiku"]:::dfs
+        L2{"format=json?"}
+        LPDF[/"HTTP 200\nContent-Type: application/pdf\nbinary PDF in response body"/]:::out
+        LJSON[/"HTTP 200\nContent-Type: application/json\n25+ structured fields"/]:::out
+        L1 --> L2
+        L2 -->|"no  default"| LPDF
+        L2 -->|"yes"| LJSON
+    end
+
+    subgraph FULL["POST /full-report  1–2 min"]
+        F1{"Lite report\nsaved?"}
+        F2["PageSpeed\nPuppeteer\nClaude Sonnet"]:::sys
+        FPDF[/"HTTP 200\nContent-Type: application/pdf\n6-page binary PDF"/]:::out
+        FERR[/"HTTP 400\nNo Lite Report found.\nCall POST /lite-report first."/]:::err
+        F1 -->|"yes"| F2
+        F1 -->|"no"| FERR
+        F2 --> FPDF
+    end
+
+    DB[("SQLite\nshared state")]:::db
+
+    CLIENT -->|"{ url, city, state, vertical }"| L1
+    LPDF -->|"saves"| DB
+    CLIENT -->|"{ url }"| F1
+    DB -->|"reads competitor"| F1
+```
+
+---
+
+## POST /lite-report
 
 ### Request
 
@@ -15,22 +59,23 @@ POST /lite-report
 Content-Type: application/json
 
 {
-  "url":      "https://acmeplumbing.com",  // required: lead website URL
-  "city":     "Dallas",                    // required: city name
-  "state":    "TX",                        // required: state name or 2-letter code
-  "vertical": "Plumbing",                  // optional: industry niche
-  "format":   "json"                       // optional: "json" to get raw data instead of PDF
+  "url":      "https://acmeplumbing.com",
+  "city":     "Dallas",
+  "state":    "TX",
+  "vertical": "Plumbing",
+  "format":   "json"
 }
 ```
 
-**Supported verticals:** Plumbing, HVAC, Electrical, Roofing Replacement, Pest Control,
-Tree Service, Painting, Flooring, Concrete, Siding, Foundation Repair, Drywall,
-Junk Removal / Demolition, Garage Door Repair / Install, Window & Door Replacement,
-Fences & Decks, Handyman, Carpet Installation, Kitchen Remodeling, Bathroom Remodeling,
-Window Cleaning, Solar Installation, Pool Installation, Insulation,
-Fire & Water Damage Restoration, Garage Conversion / ADU
+| Field | Required | Description |
+|---|---|---|
+| `url` | Yes | Lead website URL |
+| `city` | Yes | City name |
+| `state` | Yes | State name or 2-letter code |
+| `vertical` | No | Industry niche — auto-detected if omitted |
+| `format` | No | Set to `"json"` to return JSON instead of PDF |
 
-If `vertical` is omitted, defaults to "Home Services" with Plumbing benchmarks.
+**Supported verticals:** Plumbing · HVAC · Electrical · Roofing Replacement · Pest Control · Tree Service · Painting · Flooring · Concrete · Siding · Foundation Repair · Drywall · Junk Removal / Demolition · Garage Door Repair / Install · Window & Door Replacement · Fences & Decks · Handyman · Carpet Installation · Kitchen Remodeling · Bathroom Remodeling · Window Cleaning · Solar Installation · Pool Installation · Insulation · Fire & Water Damage Restoration · Garage Conversion / ADU
 
 ### Response — PDF (default)
 
@@ -39,21 +84,17 @@ HTTP 200 OK
 Content-Type: application/pdf
 Content-Disposition: attachment; filename="ARMA_LiteCheck_acmeplumbing.com.pdf"
 
-[binary PDF content]
+[binary PDF]
 ```
 
-### Response — JSON (`?format=json` or `"format":"json"` in body)
+### Response — JSON (`?format=json`)
 
-```http
-HTTP 200 OK
-Content-Type: application/json
-
+```json
 {
   "domain": "acmeplumbing.com",
   "city": "Dallas",
   "state": "TX",
   "vertical": "Plumbing",
-  "niche_matched": "Plumbing",
   "lead": {
     "name": "Acme Plumbing Co.",
     "rating": 4.7,
@@ -71,9 +112,11 @@ Content-Type: application/json
     "rating": 4.9,
     "review_count": 312,
     "domain": "dallasproplumbing.com",
-    "phone": "(214) 555-0200"
+    "phone": "(214) 555-0200",
+    "owner": "Mike Johnson",
+    "service_area": "Dallas, Irving, Garland"
   },
-  "fullPack": [ ... ],
+  "fullPack": [ "...top 5 map pack businesses..." ],
   "traffic_monthly": 420,
   "revenue": {
     "monthly_loss": 9072,
@@ -87,13 +130,10 @@ Content-Type: application/json
     "repliedCount": 7,
     "unansweredCount": 23,
     "totalChecked": 30,
-    "snippets": ["...", "...", "..."]
+    "snippets": ["...3 review excerpts with reply status..."]
   },
-  "ranking_keywords": [
-    {"keyword": "plumber", "position": 5}
-  ],
   "cold_email": {
-    "subject": "...",
+    "subject": "Acme Plumbing — #5 on Google Maps while Dallas Pro holds #3",
     "body": "..."
   }
 }
@@ -102,22 +142,13 @@ Content-Type: application/json
 ### Error Responses
 
 ```http
-HTTP 400
-{ "error": "url, city, state required" }
-
-HTTP 502
-{
-  "error": "Could not fetch map pack rankings. Check DATAFORSEO_LOGIN/PASSWORD (primary) and GOOGLE_PLACES_API_KEY (fallback).",
-  "keywords_tried": ["plumber", "plumbing service", "emergency plumber"],
-  "search_location": "Dallas, TX"
-}
+HTTP 400  { "error": "url, city, state required" }
+HTTP 502  { "error": "Could not fetch map pack rankings...", "keywords_tried": [...] }
 ```
 
 ---
 
 ## POST /full-report
-
-Runs the Full Checker. **Requires Lite Checker to have been run first for the same domain.**
 
 ### Request
 
@@ -125,10 +156,10 @@ Runs the Full Checker. **Requires Lite Checker to have been run first for the sa
 POST /full-report
 Content-Type: application/json
 
-{
-  "url": "https://acmeplumbing.com"   // required
-}
+{ "url": "https://acmeplumbing.com" }
 ```
+
+Must match a domain that has a saved Lite Report. Always returns PDF.
 
 ### Response
 
@@ -137,101 +168,89 @@ HTTP 200 OK
 Content-Type: application/pdf
 Content-Disposition: attachment; filename="ARMA_Audit_acmeplumbing.com.pdf"
 
-[binary PDF content]
+[binary 6-page PDF]
 ```
 
 ### Error Responses
 
 ```http
-HTTP 400
-{ "error": "url required" }
-
-HTTP 400
-{ "error": "No Lite Report found. Call POST /lite-report first." }
+HTTP 400  { "error": "url required" }
+HTTP 400  { "error": "No Lite Report found. Call POST /lite-report first." }
 ```
 
 ---
 
-## Batch Processing Example (200 leads/day)
+## Timing & Throughput
 
-The API processes one request at a time per connection. To run 200 leads/day,
-call the endpoint sequentially from a script:
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "13px", "lineColor": "#64748B", "clusterBkg": "#F8FAFC"}}}%%
+flowchart LR
+    classDef g fill:#DBEAFE,color:#1D4ED8,stroke:#93C5FD,stroke-width:2px
+    classDef o fill:#FEF3C7,color:#92400E,stroke:#FCD34D,stroke-width:2px
 
-```python
-import requests
-import time
+    T1["Lite per lead\n~38 sec verified"]:::g
+    T2["Full per lead\n1–2 min"]:::g
+    T3["200 leads\nLite only\n~2 hours"]:::o
+    T4["200 leads\nLite + Full\n~7 hours"]:::o
 
-leads = [
-  {"url": "https://example1.com", "city": "Dallas",  "state": "TX", "vertical": "Plumbing"},
-  {"url": "https://example2.com", "city": "Houston", "state": "TX", "vertical": "HVAC"},
-  # ...
-]
-
-BASE = "http://your-server:3002"
-
-for lead in leads:
-    # Step 1: Lite Checker → save PDF
-    r = requests.post(f"{BASE}/lite-report", json=lead, timeout=300)
-    if r.status_code == 200:
-        filename = f"lite_{lead['url'].split('//')[1].split('/')[0]}.pdf"
-        open(filename, "wb").write(r.content)
-        print(f"Saved: {filename}")
-    else:
-        print(f"Error: {r.text}")
-        continue
-
-    # Optional Step 2: Full Checker
-    r2 = requests.post(f"{BASE}/full-report", json={"url": lead["url"]}, timeout=300)
-    if r2.status_code == 200:
-        filename2 = f"full_{lead['url'].split('//')[1].split('/')[0]}.pdf"
-        open(filename2, "wb").write(r2.content)
-
-    time.sleep(2)  # brief pause between leads
+    T1 --> T3
+    T2 --> T4
 ```
 
----
+| Scenario | Time |
+|---|---|
+| Lite Checker per lead | **~38 sec** (verified) |
+| Full Checker per lead | 1–2 min |
+| 200 leads — Lite only | ~2 hours sequential |
+| 200 leads — Lite + Full | ~7 hours sequential |
 
-## Timing Expectations
-
-| Endpoint | Typical Time | What Takes the Longest |
-|---|---|---|
-| POST /lite-report | ~38 seconds (verified) | DataForSEO Reviews async task |
-| POST /full-report | 1–2 minutes | Puppeteer crawls + PageSpeed API |
+> No built-in queue. Requests are processed one at a time. For high-volume batch processing, wrap in an external job queue.
 
 ---
 
 ## Caching
 
-The system caches certain data to avoid redundant API calls:
-
-| Cache | TTL | Table |
+| Cache | TTL | Storage |
 |---|---|---|
-| Map pack results | 24 hours | `mappack_cache` |
-| PageSpeed scores | 24 hours | `pagespeed_cache` |
-| Lead/competitor data | Permanent | `leads` table |
-
-Running the same domain twice within 24h: map pack and PageSpeed are served from cache.
-To force fresh data, delete the cache row from the SQLite database.
+| Map pack results | 24 hours | `mappack_cache` SQLite table |
+| PageSpeed scores | 24 hours | `pagespeed_cache` SQLite table |
+| Lead/competitor data | Permanent until overwritten | `leads` SQLite table |
 
 ---
 
-## Quick Test (curl)
+## Code Examples
 
 ```bash
-# Lite Checker — PDF
+# Lite — save PDF
 curl -X POST http://localhost:3002/lite-report \
   -H "Content-Type: application/json" \
   -d '{"url":"https://acmeplumbing.com","city":"Dallas","state":"TX","vertical":"Plumbing"}' \
   --output lite_report.pdf
 
-# Lite Checker — JSON (for debugging or downstream processing)
+# Lite — get JSON (for automation / Claude parsing)
 curl -X POST "http://localhost:3002/lite-report?format=json" \
   -H "Content-Type: application/json" \
   -d '{"url":"https://acmeplumbing.com","city":"Dallas","state":"TX","vertical":"Plumbing"}'
 
-# Full Checker — PDF (run after lite)
+# Full — save PDF (run after Lite for same domain)
 curl -X POST http://localhost:3002/full-report \
   -H "Content-Type: application/json" \
   -d '{"url":"https://acmeplumbing.com"}' \
   --output full_report.pdf
+```
+
+```python
+import requests, time
+
+leads = [
+  {"url": "https://example1.com", "city": "Dallas",  "state": "TX", "vertical": "Plumbing"},
+  {"url": "https://example2.com", "city": "Houston", "state": "TX", "vertical": "HVAC"},
+]
+
+for lead in leads:
+    r = requests.post("http://localhost:3002/lite-report", json=lead, timeout=300)
+    if r.status_code == 200:
+        domain = lead["url"].split("//")[1].split("/")[0]
+        open(f"lite_{domain}.pdf", "wb").write(r.content)
+    time.sleep(2)
 ```
