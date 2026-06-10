@@ -167,7 +167,8 @@ ABSOLUTE RULES:
 5. Review response rules — follow exactly: if clearlyNotRespondingToReviews=true → recommend "respond to every review". If hasUnansweredButGenerallyResponds=true → recommend replying to their specific unanswered reviews (use the unansweredCount). If alreadyRespondingToReviews=true (or data unknown) → pick a completely different GBP fix.
 8. ONLY reference ${lead.name} and ${competitor.name} by name. Never name any other business from the full pack in fix descriptions or body text.
 6. NEVER recommend adding GBP posts if alreadyPostingWeekly=true — pick a different GBP fix.
-7. NEVER recommend adding click-to-call or phone visibility improvements if phoneAboveFoldMobile=true — pick a different page3 fix.`;
+7. NEVER recommend adding click-to-call or phone visibility improvements if phoneAboveFoldMobile=true — pick a different page3 fix.
+9. NEVER recommend adding/creating something the LEAD CRAWL booleans show already exists — if hasServiceAreaPages, hasBookingForm, hasEmergencyMessaging, hasFinancing, hasTrustBadges, hasReviewsOnHome, hasStickyCTA, or hasAboveFoldCTA is true, that thing is already on the site, so do not suggest adding it. Pick a fix for something the data shows is actually missing or weak instead.`;
 
   const prompt = `REAL DATA. USE ONLY THESE:
 Lead: ${lead.name} | ${city}, ${state} | Vertical: ${vertical}
@@ -247,8 +248,9 @@ Output this JSON (all fix arrays must have EXACTLY 3 items):
   "cold_email_hook": "2 sentences. Names ${lead.name}, position #${lead.position}, ${competitor.name} at #${competitor.position}, one specific number. No SEO jargon."
 }
 
-page5_issues candidates (only issues not already used on pages 2–4):
-noServiceArea:${!crawl.hasServiceAreaPages} | noBookingForm:${!crawl.hasBookingForm} | noEmergency:${!crawl.hasEmergencyMessaging} | noFinancing:${!crawl.hasFinancing} | domainMismatch:${crawl.hasDomainMismatch}`;
+page5_issues candidates (only issues not already used on pages 2–4) — use whichever of these are true:
+noServiceArea:${!crawl.hasServiceAreaPages} | noBookingForm:${!crawl.hasBookingForm} | noEmergency:${!crawl.hasEmergencyMessaging} | noFinancing:${!crawl.hasFinancing} | domainMismatch:${crawl.hasDomainMismatch}
+If fewer than 2 of those are true, the site already covers the content basics — fill the remaining slot(s) with GBP profile gaps instead, which always apply: low GBP photo count (recommend 30+ recent geo-tagged job photos), and ${alreadyPostingWeekly ? 'adding GBP Q&A seeded with the 5 most common buyer questions (postsPerWeek already healthy)' : `posting to GBP weekly (postsPerWeek:${gbpPostsPerWeek != null ? gbpPostsPerWeek.toFixed(1) : 'unknown'}, not yet weekly)`}.`;
 
   // Attach screenshots for visual verification — Claude overrides any DOM boolean
   // that contradicts what's actually visible on screen (e.g. phone in banner text).

@@ -1,21 +1,147 @@
 import { fetchT } from '../lib/http';
 import db from '../db';
-import { getBuyerIntentKeywords } from '../benchmarks';
 import { dfsAuth } from '../lib/auth';
 import { resolveStateName } from '../services/gbp';
+import { placesTextSearch, placeWebsite, type PlaceResult } from '../lib/places';
 
-// Brand fragments excluded from competitor selection.
-// Empty by default — pass your own list via MapPackConfig.excludedBrands.
+// Neutral Google experiment-params token for Maps fallback searches.
+const MAPS_G_EP = 'Egdnd3Mtd2l6IgFoKgIIAEgAUABYAHAAeACQAQCYAQCgAQCqAQC4AQPIAQCYAgCgAgCYAwCSBwCgBwCyBwC4BwDCBwDIBwCACAE';
+
+// Builds the Google Search verification URL — short form matches what users actually type.
+function buildSearchUrl(vertical: string, city: string): string {
+  const q = encodeURIComponent(`${vertical.toLowerCase()} in ${city.toLowerCase()}`).replace(/%20/g, '+');
+  return `https://www.google.com/search?q=${q}&udm=1`;
+}
+
+// Builds the Google Maps URL for the Maps scrape — includes state in query.
+function buildMapsUrl(vertical: string, city: string, state: string, lat: number, lng: number): string {
+  const q = encodeURIComponent(`${vertical.toLowerCase()} in ${city.toLowerCase()} ${state.toLowerCase()}`).replace(/%20/g, '+');
+  return `https://www.google.com/maps/search/${q}/@${lat},${lng},11z/data=!3m1!4b1?entry=ttu&g_ep=${MAPS_G_EP}`;
+}
+
+// DataForSEO local_finder scrapes google.com/search (the same page a prospect sees).
+// Falls back to Maps endpoint, then to Google Places API.
+async function getMapsPackFromDFS(
+  vertical: string,
+  city: string,
+  state: string,
+): Promise<{ places: PlaceResult[]; source: string } | null> {
+  if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) return null;
+  const fullState = await resolveStateName(city, state);
+  const locationName = `${city},${fullState},United States`;
+
+  // Geocode once — used by Maps fallback URL.
+  const coords = await geocodeCity(city, state);
+
+  // Primary: local_finder scrapes Google Search Places tab (matches manual verification on udm=1).
+  // Use "vertical in city" WITHOUT state — matches exactly what a user types when searching.
+  // location_coordinate handles geo-disambiguation, avoiding the 40501 "Invalid Field" error
+  // that occurs when keyword has city name AND location_name is also provided.
+  // Secondary: Maps endpoint URL scrape — reliable, returns place_ids, but different surface.
+  const shortQuery  = `${vertical.toLowerCase()} in ${city.toLowerCase()}`;
+  const searchQuery = `${vertical.toLowerCase()} in ${city.toLowerCase()} ${fullState.toLowerCase()}`;
+  const attempts: Array<{ endpoint: string; body: Record<string, any>; label: string; timeout: number }> = [
+    {
+      endpoint: 'serp/google/local_finder/live/advanced',
+      body: {
+        keyword: shortQuery,
+        ...(coords
+          ? { location_coordinate: `${coords.lat},${coords.lng}` }
+          : { location_name: locationName }),
+        language_name: 'English',
+        depth: 10,
+      },
+      label: 'dataforseo_local_finder',
+      timeout: 90000,
+    },
+    {
+      endpoint: 'serp/google/maps/live/advanced',
+      body: coords
+        ? { url: buildMapsUrl(vertical, city, fullState, coords.lat, coords.lng), depth: 100, language_name: 'English' }
+        : { keyword: searchQuery, location_name: locationName, language_name: 'English', depth: 100 },
+      label: 'dataforseo_maps',
+      timeout: 60000,
+    },
+  ];
+
+  for (const { endpoint, body, label, timeout } of attempts) {
+    const queryDesc = (body as any).url ?? (body as any).keyword ?? label;
+    try {
+      const res = await fetchT(
+        `https://api.dataforseo.com/v3/${endpoint}`,
+        {
+          method:  'POST',
+          headers: { Authorization: `Basic ${dfsAuth()}`, 'Content-Type': 'application/json' },
+          body:    JSON.stringify([body]),
+        },
+        timeout,
+      );
+      const json  = await res.json();
+      const task0 = json.tasks?.[0];
+      if (task0?.status_code !== 20000) {
+        console.warn(`[MapPack] DFS ${label} status ${task0?.status_code}: ${task0?.status_message}`);
+        continue;
+      }
+      const rawItems: any[] = task0?.result?.[0]?.items ?? [];
+      const typeCounts = rawItems.reduce((m: any, i: any) => { m[i.type] = (m[i.type] ?? 0) + 1; return m; }, {});
+      console.log(`[MapPack] ${label} raw ${rawItems.length} items, types:`, JSON.stringify(typeCounts));
+      // maps endpoint items have type='maps_search'.
+      // local_finder endpoint items have type='local_pack' (confirmed from live API response).
+      // Filter to the right type so ads/featured-snippets don't inflate rankings.
+      const typeFilter = endpoint.includes('local_finder') ? 'local_pack' : 'maps_search';
+      const typed = rawItems.filter((i: any) => i.type === typeFilter);
+      const items = (typed.length > 0 ? typed : rawItems)
+        .sort((a: any, b: any) => (a.rank_group ?? 999) - (b.rank_group ?? 999));
+
+      // Some businesses appear twice (once without place_id as a featured card, once with place_id
+      // as a map pin). Deduplicate by name: keep the first-seen rank, but use the place_id from
+      // whichever instance has one.
+      const placeIdByName = new Map<string, string>();
+      for (const i of items) {
+        if (!i.title || !i.place_id) continue;
+        const key = i.title.toLowerCase().trim();
+        if (!placeIdByName.has(key)) placeIdByName.set(key, i.place_id);
+      }
+
+      const seen = new Set<string>();
+      const places: PlaceResult[] = [];
+      for (const i of items) {
+        if (!i.title || i.is_paid) continue;
+        const key = i.title.toLowerCase().trim();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        places.push({
+          place_id:           placeIdByName.get(key) ?? i.place_id ?? '',
+          name:               i.title,
+          rating:             i.rating?.value ?? 0,
+          user_ratings_total: i.rating?.votes_count ?? 0,
+        });
+      }
+
+      if (!places.length) {
+        console.warn(`[MapPack] DFS ${label}: 0 results for "${queryDesc}"`);
+        continue;
+      }
+      console.log(`[MapPack] DFS ${label}: ${places.length} unique results for "${queryDesc}"`);
+      places.forEach((p, i) =>
+        console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total} place_id:${p.place_id || 'none'}`)
+      );
+      return { places, source: label };
+    } catch (e: any) {
+      console.warn(`[MapPack] DFS ${label} error:`, e.message);
+    }
+  }
+  return null;
+}
+
 export const DEFAULT_EXCLUDED_BRANDS: string[] = [];
 
 export interface MapPackConfig {
   excludedBrands?: string[];
-  /** Internal: skip competitor lookup for secondary keyword searches. */
-  _skipCompetitor?: boolean;
 }
 
-//  Lead #2–4  → compare with #1   (within striking distance)
-//  Lead #5–8  → compare with #3   (achievable next step)
+//  Lead #2–4  → compare with #1
+//  Lead #5–8  → compare with #3
 //  Lead #9–13 → compare with #4
 //  Lead #14+  → compare with #5
 function pickCompetitorRank(leadPos: number): number {
@@ -26,7 +152,7 @@ function pickCompetitorRank(leadPos: number): number {
   return 5;
 }
 
-// In-memory geocode cache — city+state → lat/lng (persists for process lifetime).
+// Geocoding API — city centre lat/lng for Places location bias.
 const _geocodeCache = new Map<string, { lat: number; lng: number }>();
 
 async function geocodeCity(city: string, state: string): Promise<{ lat: number; lng: number } | null> {
@@ -48,123 +174,63 @@ async function geocodeCity(city: string, state: string): Promise<{ lat: number; 
   }
 }
 
-// Fetch Google Places Text Search results for a query.
-// Results are ordered by Google's prominence ranking — position 1 = #1 on Google Maps.
-// Fetches up to 3 pages (60 results) to find businesses ranked lower on the map.
-async function searchGooglePlaces(query: string, coords?: { lat: number; lng: number }): Promise<any[]> {
+// Google Places API v1 text search — up to 40 results (2 pages × 20).
+// Uses locationRestriction (hard boundary) at 15 km radius around city centre so the ranked
+// list matches what a user sees when manually searching on Google Maps from that city.
+async function searchPlaces(query: string, coords?: { lat: number; lng: number }): Promise<PlaceResult[]> {
   if (!process.env.GOOGLE_PLACES_API_KEY) {
-    console.warn('[MapPack] GOOGLE_PLACES_API_KEY not set — cannot fetch rankings');
+    console.warn('[MapPack] GOOGLE_PLACES_API_KEY not set');
     return [];
   }
-  const allResults: any[] = [];
-  let pageToken: string | undefined;
+  // 15 km strict boundary — covers the city proper while excluding the next city over.
+  const locationBias = coords ? { lat: coords.lat, lng: coords.lng, radius: 15000 } : undefined;
+  const all: PlaceResult[] = [];
+  let nextToken: string | undefined;
 
-  for (let page = 0; page < 3; page++) {
-    if (page > 0 && !pageToken) break;
-    // Google requires a short pause before using next_page_token
-    if (page > 0) await new Promise(r => setTimeout(r, 2000));
-    try {
-      let url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${process.env.GOOGLE_PLACES_API_KEY}`;
-      // Bias results to city centre (20 km radius) — brings rankings closer to the
-      // Map Pack a user in that city would see, without restricting to the radius only.
-      if (coords) url += `&location=${coords.lat},${coords.lng}&radius=20000`;
-      if (pageToken) url += `&pagetoken=${pageToken}`;
-      const res  = await fetchT(url, {}, 15000);
-      const json = await res.json();
-      if (json.status === 'ZERO_RESULTS') break;
-      if (json.status !== 'OK') {
-        console.warn(`[MapPack] Places status="${json.status}" query="${query}"`);
-        break;
-      }
-      allResults.push(...(json.results ?? []));
-      pageToken = json.next_page_token;
-      if (!pageToken) break;
-    } catch (e: any) {
-      console.warn('[MapPack] Places search error:', e.message);
-      break;
-    }
+  for (let page = 0; page < 2; page++) {
+    if (page > 0 && !nextToken) break;
+    // strictToArea=true → locationRestriction, giving rankings closest to Google Maps local pack.
+    const { results, nextPageToken } = await placesTextSearch(query, locationBias, nextToken, true);
+    if (!results.length) break;
+    all.push(...results);
+    nextToken = nextPageToken;
+    if (!nextToken) break;
   }
-  return allResults;
+  return all;
 }
 
-// Fetch Google Maps rankings via DataForSEO SERP — returns results exactly as
-// users see them on Google Maps, unlike the Places Text Search API.
-async function searchDataForSEOMaps(
-  query: string,
-  city: string,
-  state: string,
-): Promise<any[] | null> {
-  if (!process.env.DATAFORSEO_LOGIN) return null;
-  try {
-    const fullState = await resolveStateName(city, state);
-    const body = {
-      keyword:       query,
-      location_name: `${city},${fullState},United States`,
-      language_name: 'English',
-      depth:         100,
-    };
-    const res  = await fetchT(
-      'https://api.dataforseo.com/v3/serp/google/maps/live/advanced',
-      {
-        method:  'POST',
-        headers: { Authorization: `Basic ${dfsAuth()}`, 'Content-Type': 'application/json' },
-        body:    JSON.stringify([body]),
-      },
-      30000,
-    );
-    const json     = await res.json();
-    const task0    = json.tasks?.[0];
-    const taskCode = task0?.status_code;
-    if (taskCode && taskCode !== 20000) {
-      console.warn(`[MapPack] DFS Maps status ${taskCode}: ${task0?.status_message} for "${query}"`);
-      return null;
-    }
-    const items: any[] = (task0?.result?.[0]?.items ?? [])
-      .filter((i: any) => i.type === 'maps_search' && i.title)
-      // Sort by rank_group so sponsored/mixed results don't shift organic positions.
-      .sort((a: any, b: any) => (a.rank_group ?? 999) - (b.rank_group ?? 999));
-    console.log(`[MapPack] DFS Maps: ${items.length} results for "${query}"`);
-    if (!items.length) return null;
-    items.forEach((p: any) =>
-      console.log(`  #${p.rank_group ?? '?'} "${p.title}" reviews:${p.rating?.votes_count ?? 0} place_id:${p.place_id ?? 'none'}`)
-    );
-    return items.map((i: any) => ({
-      name:               i.title ?? '',
-      rating:             i.rating?.value ?? 0,
-      user_ratings_total: i.rating?.votes_count ?? 0,
-      place_id:           i.place_id ?? null,
-      rank_group:         typeof i.rank_group === 'number' ? i.rank_group : null,
-    }));
-  } catch (e: any) {
-    console.warn('[MapPack] DFS Maps error:', e.message);
-    return null;
-  }
-}
+// ─── Map Pack lookup ─────────────────────────────────────────────────────────
 
-// ─── Local Map Pack ─────────────────────────────────────────────────────────
-// Prefers DataForSEO SERP Maps (matches what users see on Google Maps).
-// Falls back to Google Places Text Search when DFS is unavailable.
+export type MapPackResult = {
+  leadPosition: number;
+  fullPack: Array<{
+    position: number; name: string; rating: number; review_count: number;
+    place_id: string | null; gbp_url: string | null; isLead: boolean; isCompetitor: boolean;
+  }>;
+  dataSource: string;
+  competitor: {
+    name: string; rating: number; review_count: number; position: number;
+    domain: string; place_id: string; gbp_url: string | null;
+  };
+};
 
-async function getLocalMapPack(
+export async function getMapPackPosition(
   vertical: string,
   city: string,
   state: string,
   leadName: string,
-  leadPositionHint: number,
-  leadReviewCount = 0,
-  leadPlaceId = "",
-  leadRating = 0,
-  searchKeyword?: string,
+  leadReviewCount: number,
+  leadPlaceId: string,
+  leadRating: number,
   config: MapPackConfig = {},
-) {
-  const { excludedBrands = DEFAULT_EXCLUDED_BRANDS, _skipCompetitor = false } = config;
-  const keyword  = searchKeyword ?? vertical;
-  const query    = `${keyword} in ${city}`;
-  const cacheKey = keyword;
+): Promise<{ primaryMapData: MapPackResult; leadPosition: number } | null> {
+  const { excludedBrands = DEFAULT_EXCLUDED_BRANDS } = config;
 
-  // ── Cache (24-hour TTL) ────────────────────────────────────────────────────
-  let places: any[];
-  let dataSource = 'google_places';
+  const cacheKey = vertical.toLowerCase();
+
+  // ── Cache (24-hour TTL) ──────────────────────────────────────────────────────
+  let places: PlaceResult[];
+  let dataSource: string;
 
   const cached: any = db.prepare(
     `SELECT items_json FROM mappack_cache WHERE keyword=? AND city=? AND state=? AND fetched_at>datetime('now','-24 hours')`
@@ -173,172 +239,168 @@ async function getLocalMapPack(
   if (cached) {
     places = JSON.parse(cached.items_json);
     dataSource = 'cached';
-    console.log(`[MapPack] Cache hit: "${keyword}" @ ${city} (${places.length} results)`);
+    console.log(`[MapPack] Cache hit: "${vertical} ${city}" (${places.length} results)`);
   } else {
-    const dfsResults = await searchDataForSEOMaps(query, city, state);
-    if (dfsResults && dfsResults.length > 0) {
-      places     = dfsResults;
-      dataSource = 'dataforseo_maps';
+    // Primary: DataForSEO Local Finder — matches "HVAC Toledo" Google Search results
+    const dfsResult = await getMapsPackFromDFS(vertical, city, state);
+    if (dfsResult) {
+      places = dfsResult.places;
+      dataSource = dfsResult.source;
     } else {
-      console.log(`[MapPack] DFS Maps returned no results for "${query}" — falling back to Google Places`);
-      const cityCoords = await geocodeCity(city, state);
-      places = await searchGooglePlaces(query, cityCoords ?? undefined);
+      // Fallback: Google Places text search (less accurate — ranks by relevance, not proximity)
+      const query = `${vertical} ${city}`;
+      console.log(`[MapPack] DFS unavailable — falling back to Google Places for "${query}"`);
+      const coords = await geocodeCity(city, state);
+      places = await searchPlaces(query, coords ?? undefined);
       if (!places.length) {
-        console.error(`[MapPack] Google Places also returned 0 results for "${query}" @ ${city},${state}. Check GOOGLE_PLACES_API_KEY quota.`);
+        console.error(`[MapPack] No results for "${query}" — check GOOGLE_PLACES_API_KEY quota`);
         return null;
       }
       dataSource = 'google_places';
-      console.log(`[MapPack] Google Places: ${places.length} results for "${query}"`);
+      console.log(`[MapPack] Google Places: ${places.length} results`);
       places.forEach((p, i) =>
-        console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total ?? 0} place_id:${p.place_id ?? 'none'}`)
+        console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total} place_id:${p.place_id}`)
       );
     }
     db.prepare(
-      `INSERT OR REPLACE INTO mappack_cache (keyword, city, state, items_json) VALUES (?,?,?,?)`
+      `INSERT OR REPLACE INTO mappack_cache (keyword,city,state,items_json) VALUES (?,?,?,?)`
     ).run(cacheKey, city, state, JSON.stringify(places));
   }
 
-  // ── Find lead ──────────────────────────────────────────────────────────────
-  // Pass 1: exact place_id match — zero ambiguity
+  // ── Find lead ────────────────────────────────────────────────────────────────
   let leadIdx = -1;
+
+  // Pass 1: exact place_id
   if (leadPlaceId) {
-    leadIdx = places.findIndex((p: any) => p.place_id === leadPlaceId);
+    leadIdx = places.findIndex(p => p.place_id === leadPlaceId);
     if (leadIdx !== -1)
       console.log(`[MapPack] ✓ Lead by place_id: #${leadIdx + 1} "${places[leadIdx].name}"`);
     else
-      console.warn(`[MapPack] ✗ Lead place_id "${leadPlaceId}" not in top-${places.length} Places results`);
+      console.warn(`[MapPack] ✗ Lead place_id "${leadPlaceId}" not in top-${places.length} results`);
   }
 
-  // Pass 2: fallback scoring (name words + review count)
+  // Pass 2: name + review count fuzzy match
   if (leadIdx === -1) {
-    const leadWords = leadName.toLowerCase().replace(/[-.']/g, ' ').split(' ').filter((w: string) => w.length > 3);
+    const leadWords = leadName.toLowerCase().replace(/[-.']/g, ' ').split(' ').filter(w => w.length > 3);
     let bestScore = 0;
     for (let i = 0; i < places.length; i++) {
-      const t  = (places[i].name ?? '').toLowerCase();
-      const rv = places[i].user_ratings_total ?? 0;
+      const t = places[i].name.toLowerCase();
       let score = 0;
-      if (leadWords.some((w: string) => t.includes(w)))           score += 40;
-      if (leadReviewCount > 0 && rv === leadReviewCount)           score += 80;
+      if (leadWords.some(w => t.includes(w)))                         score += 40;
+      if (leadReviewCount > 0 && places[i].user_ratings_total === leadReviewCount) score += 80;
       if (score > bestScore) { bestScore = score; leadIdx = i; }
     }
     if (leadIdx !== -1)
-      console.log(`[MapPack] ✓ Lead by fallback: #${leadIdx + 1} "${places[leadIdx].name}" score=${bestScore}`);
+      console.log(`[MapPack] ✓ Lead by name match: #${leadIdx + 1} "${places[leadIdx].name}"`);
     else
-      console.warn(`[MapPack] ✗ Lead not found for "${keyword}" @ ${city}`);
+      console.warn(`[MapPack] ✗ Lead not found in results`);
   }
 
-  const leadPos         = leadIdx !== -1
-    ? ((places[leadIdx] as any).rank_group ?? leadIdx + 1)
-    : leadPositionHint;
+  const leadPos         = leadIdx !== -1 ? leadIdx + 1 : 99;
   const leadPlaceResult = leadIdx !== -1 ? places[leadIdx] : null;
 
-  // ── Find competitor ────────────────────────────────────────────────────────
-  const targetRank  = pickCompetitorRank(leadPos);
-  console.log(`[MapPack] Lead #${leadPos} → competitor target rank #${targetRank}`);
+  // ── Find competitor ──────────────────────────────────────────────────────────
+  const targetRank = pickCompetitorRank(leadPos);
+  console.log(`[MapPack] Lead rank #${leadPos} → competitor target rank #${targetRank}`);
 
-  const isExcluded = (p: any) =>
-    excludedBrands.some(b => (p.name ?? '').toLowerCase().includes(b.toLowerCase()));
+  const isExcluded = (p: PlaceResult) =>
+    excludedBrands.some(b => p.name.toLowerCase().includes(b.toLowerCase()));
 
-  let compIdx     = -1;
-  let validCount  = 0;
-  let lastValidIdx = -1;
-
+  let compIdx = -1, validCount = 0, lastValidIdx = -1;
   for (let i = 0; i < places.length; i++) {
-    if (leadPlaceId && places[i].place_id === leadPlaceId) continue;
-    if (!leadPlaceId && leadPlaceResult && places[i] === leadPlaceResult) continue;
-    if (isExcluded(places[i])) {
-      console.log(`[MapPack]   skip excluded "${places[i].name}"`);
-      continue;
-    }
+    // Exclude lead by index (reliable) AND by place_id when both have one (extra safety).
+    // Avoid place_id-only check: local_finder items often have place_id='' which would
+    // match every other empty-id item and skip the entire list.
+    if (i === leadIdx) continue;
+    if (leadPlaceResult?.place_id && places[i].place_id === leadPlaceResult.place_id) continue;
+    if (isExcluded(places[i])) continue;
     validCount++;
     lastValidIdx = i;
     if (validCount === targetRank) { compIdx = i; break; }
   }
-
-  if (compIdx === -1 && lastValidIdx !== -1) {
-    compIdx = lastValidIdx;
-    console.log(`[MapPack] Fewer than ${targetRank} valid competitors — using last valid #${compIdx + 1}`);
-  }
+  if (compIdx === -1) compIdx = lastValidIdx;
 
   if (compIdx === -1) {
-    console.error(`[MapPack] No competitor found in Places results for "${query}"`);
+    console.error(`[MapPack] No competitor found for "${vertical} ${city}"`);
     return null;
   }
 
   const compPlace = places[compIdx];
-  const compPos   = (compPlace as any).rank_group ?? compIdx + 1;
+  const compPos   = compIdx + 1;
 
-  // Get competitor website via Places Details (only for primary keyword)
-  let compDomain = '';
-  if (!_skipCompetitor && compPlace.place_id) {
-    try {
-      const dr = await fetchT(
-        `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(compPlace.place_id)}&fields=website&key=${process.env.GOOGLE_PLACES_API_KEY}`
-      );
-      const dj = await dr.json();
-      if (dj.result?.website) compDomain = new URL(dj.result.website).hostname.replace('www.', '');
-    } catch { }
-  }
+  console.log(`[MapPack] ✓ Competitor rank #${compPos}: "${compPlace.name}" reviews:${compPlace.user_ratings_total} rating:${compPlace.rating}`);
 
   const toGbpUrl = (pid: string) => `https://www.google.com/maps/place/?q=place_id:${pid}`;
 
-  console.log(`[MapPack] ✓ Competitor #${compPos}: "${compPlace.name}" reviews:${compPlace.user_ratings_total ?? 0} rating:${compPlace.rating ?? 0}`);
+  // DFS local_finder (the primary source) frequently returns place_id='' for every
+  // entry. The lead's real place_id is already known (passed in as leadPlaceId);
+  // resolve a real place_id for the competitor via a Places API name search so the
+  // report has a working, verifiable Maps link/domain/phone for them.
+  const leadActualPid = leadPlaceResult?.place_id || leadPlaceId;
 
-  // ── Build fullPack (exactly 5 entries) ────────────────────────────────────
-  // Always include lead + competitor so the report can tag ← YOU and ← THEM.
-  // Fill remaining slots from the top of the Places ranked list.
-  const mustPids = new Set<string>([
-    ...(leadPlaceResult?.place_id ? [leadPlaceResult.place_id as string] : []),
-    ...(compPlace.place_id        ? [compPlace.place_id        as string] : []),
-  ]);
-  const mustItems: any[] = [];
-  const seenPid = new Set<string>();
-  for (const p of [leadPlaceResult, compPlace]) {
-    if (!p || !p.place_id || seenPid.has(p.place_id)) continue;
-    seenPid.add(p.place_id);
-    mustItems.push(p);
+  let compPlaceId = compPlace.place_id;
+  if (!compPlaceId) {
+    const coords = await geocodeCity(city, state);
+    const found = await searchPlaces(`${compPlace.name} ${city} ${state}`, coords ?? undefined);
+    compPlaceId = found.find(p => p.name.toLowerCase() === compPlace.name.toLowerCase())?.place_id
+      || found[0]?.place_id || '';
   }
+
+  // Competitor website
+  let compDomain = '';
+  if (compPlaceId) {
+    try {
+      const website = await placeWebsite(compPlaceId);
+      if (website) compDomain = new URL(website).hostname.replace('www.', '');
+    } catch { }
+  }
+
+  // fullPack: top-5 slots always including lead + competitor.
+  // Identify by object reference, not place_id — DFS results frequently have empty
+  // place_id for every entry, which broke both the isLead/isCompetitor flags and the
+  // "always include lead + competitor" guarantee whenever they ranked outside top-5.
+  const mustItems = [leadPlaceResult, compPlace].filter((p, i, arr) =>
+    p && arr.indexOf(p) === i
+  ) as PlaceResult[];
   const fillers = places
-    .filter((p: any) => !mustPids.has(p.place_id))
+    .filter(p => !mustItems.includes(p))
     .slice(0, Math.max(0, 5 - mustItems.length));
+  const packPlaces = [...mustItems, ...fillers].sort((a, b) => places.indexOf(a) - places.indexOf(b));
 
-  const packPlaces = [...mustItems, ...fillers].sort((a: any, b: any) => {
-    return places.indexOf(a) - places.indexOf(b);
-  });
-
-  const leadActualPid = leadPlaceResult?.place_id ?? leadPlaceId;
-
-  const fullPack = packPlaces.map((place: any) => {
-    const pos = (place as any).rank_group ?? (places.indexOf(place) + 1);
+  const fullPack = packPlaces.map(place => {
+    const pid = place === leadPlaceResult ? leadActualPid
+      : place === compPlace ? compPlaceId
+      : place.place_id;
     return {
-      position:     pos,
-      name:         place.name ?? '',
-      rating:       place.rating ?? 0,
-      review_count: place.user_ratings_total ?? 0,
-      place_id:     place.place_id ?? null,
-      gbp_url:      place.place_id ? toGbpUrl(place.place_id) : null,
-      isLead:       !!leadActualPid && place.place_id === leadActualPid,
-      isCompetitor: !!compPlace.place_id && place.place_id === compPlace.place_id,
+      position:     places.indexOf(place) + 1,
+      name:         place.name,
+      rating:       place.rating,
+      review_count: place.user_ratings_total,
+      place_id:     pid || null,
+      gbp_url:      pid ? toGbpUrl(pid) : null,
+      isLead:       place === leadPlaceResult,
+      isCompetitor: place === compPlace,
     };
   });
 
   const competitor = {
-    name:         compPlace.name ?? '',
-    rating:       compPlace.rating ?? 0,
-    review_count: compPlace.user_ratings_total ?? 0,
+    name:         compPlace.name,
+    rating:       compPlace.rating,
+    review_count: compPlace.user_ratings_total,
     position:     compPos,
     domain:       compDomain,
-    place_id:     compPlace.place_id ?? '',
-    gbp_url:      compPlace.place_id ? toGbpUrl(compPlace.place_id) : null,
+    place_id:     compPlaceId,
+    gbp_url:      compPlaceId ? toGbpUrl(compPlaceId) : null,
   };
 
-  return { leadPosition: leadPos, fullPack, dataSource, competitor };
+  const inPack = leadPos <= 3 ? ' ✓ IN TOP-3 MAP PACK' : leadPos <= 10 ? ' (top 10)' : '';
+  console.log(`[MapPack] Google Maps rank: #${leadPos}${inPack} for "${vertical} ${city}" (source: ${dataSource})`);
+
+  const primaryMapData: MapPackResult = { leadPosition: leadPos, fullPack, dataSource, competitor };
+  return { primaryMapData, leadPosition: leadPos };
 }
 
-// ─── Multi-keyword Position ──────────────────────────────────────────────────
-
-export type MapPackResult = NonNullable<Awaited<ReturnType<typeof getLocalMapPack>>>;
-
+// Keep getWeightedPosition as a thin wrapper so existing callers don't break.
 export async function getWeightedPosition(
   vertical: string,
   city: string,
@@ -347,50 +409,22 @@ export async function getWeightedPosition(
   leadReviewCount: number,
   leadPlaceId: string,
   leadRating: number,
-  config: MapPackConfig = {}
+  config: MapPackConfig = {},
 ): Promise<{
   primaryMapData: MapPackResult;
   weightedPosition: number;
   rankingKeywords: Array<{ keyword: string; position: number | null }>;
 } | null> {
-  const keywords = getBuyerIntentKeywords(vertical);
-  console.log(`[MapPack] Searching ${keywords.length} keywords for "${vertical}" @ ${city}: ${keywords.join(', ')}`);
-
-  const results = await Promise.all(
-    keywords.map((kw, idx) =>
-      getLocalMapPack(
-        vertical, city, state, leadName, 99, leadReviewCount, leadPlaceId, leadRating, kw,
-        { ...config, _skipCompetitor: idx > 0 },
-      )
-        .then(data => ({ keyword: kw, data }))
-        .catch((err: any) => {
-          console.error(`[MapPack] getLocalMapPack threw for "${kw}":`, err?.message ?? err);
-          return { keyword: kw, data: null };
-        })
-    )
-  );
-
-  const primary = results[0];
-  if (!primary?.data) {
-    console.warn('[MapPack] Primary keyword returned no data');
-    return null;
-  }
-
-  const weightedPosition = primary.data.leadPosition;
-
-  const rankingKeywords = results.map(r => ({
-    keyword:  r.keyword,
-    position: r.data?.leadPosition ?? null,
-  }));
-
-  console.log(`[MapPack] Position: #${weightedPosition} (Google Places rank) | all: ${rankingKeywords.map(x => `"${x.keyword}":#${x.position ?? 'N/F'}`).join(' | ')}`);
-
-  return { primaryMapData: primary.data, weightedPosition, rankingKeywords };
+  const result = await getMapPackPosition(vertical, city, state, leadName, leadReviewCount, leadPlaceId, leadRating, config);
+  if (!result) return null;
+  return {
+    primaryMapData:  result.primaryMapData,
+    weightedPosition: result.leadPosition,
+    rankingKeywords: [{ keyword: `${vertical} ${city}`, position: result.leadPosition }],
+  };
 }
 
 // ─── Organic Search Position ─────────────────────────────────────────────────
-// Uses DFS SERP Google Organic to find the lead's position in regular (non-maps)
-// Google search results for the primary keyword — e.g. "hvac in Toledo".
 
 export async function getOrganicPosition(
   domain: string,
@@ -418,7 +452,7 @@ export async function getOrganicPosition(
     const json  = await res.json();
     const task0 = json.tasks?.[0];
     if (task0?.status_code !== 20000) {
-      console.warn(`[Organic] DFS status ${task0?.status_code}: ${task0?.status_message} for "${keyword}"`);
+      console.warn(`[Organic] DFS status ${task0?.status_code}: ${task0?.status_message}`);
       return null;
     }
     const items: any[] = task0?.result?.[0]?.items ?? [];

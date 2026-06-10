@@ -140,12 +140,12 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
 
   // Persist to DB — the full report reads competitor_* fields from this row for consistency
   db.prepare(`INSERT OR REPLACE INTO leads
-    (lead_id,business_name,domain,city,state,vertical,niche_matched,primary_keyword,
+    (domain,business_name,city,state,vertical,niche_matched,primary_keyword,
     lead_gbp_rating,lead_review_count,lead_map_position,lead_gbp_place_id,
     competitor_name,competitor_domain,competitor_gbp_id,competitor_rating,competitor_review_count,competitor_position,
     traffic_monthly,lite_report_data,lite_report_generated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`)
-    .run(domain, realName, domain, searchCity, searchState, niche, niche_matched,
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`)
+    .run(domain, realName, searchCity, searchState, niche, niche_matched,
       rankingKeywords.map(k => k.keyword).join(', '),
       gbp.rating, gbp.review_count, weightedPosition, gbp.place_id,
       competitor.name, competitor.domain, competitor.place_id,

@@ -1,5 +1,6 @@
 import { fetchT } from '../lib/http';
 import { dfsAuth } from '../lib/auth';
+import { placesTextSearch, placeDetails, placePhone, placeCoords } from '../lib/places';
 
 export async function getLeadGBP(name: string, city: string, state: string, domain = "") {
   const cleanDomain = domain.replace(/^www\./, '').toLowerCase();
@@ -11,42 +12,23 @@ export async function getLeadGBP(name: string, city: string, state: string, doma
     return host === cleanDomain;
   };
 
-  const fetchDetails = async (place_id: string): Promise<{ website: string; city: string; state: string; phone: string; address: string }> => {
-    try {
-      const r = await fetchT(`https://maps.googleapis.com/maps/api/place/details/json?place_id=${place_id}&fields=website,address_components,formatted_phone_number,formatted_address&key=${process.env.GOOGLE_PLACES_API_KEY}`);
-      const j = await r.json();
-      const comps: any[] = j.result?.address_components ?? [];
-      const city  = comps.find((c: any) => c.types.includes('locality'))?.long_name ?? '';
-      const state = comps.find((c: any) => c.types.includes('administrative_area_level_1'))?.long_name ?? '';
-      return {
-        website: j.result?.website ?? '',
-        city,
-        state,
-        phone:   j.result?.formatted_phone_number ?? '',
-        address: j.result?.formatted_address ?? '',
-      };
-    } catch { return { website: '', city: '', state: '', phone: '', address: '' }; }
-  };
-
   const trySearch = async (query: string): Promise<{
     rating: number; review_count: number; place_id: string; real_name: string;
     gbp_city: string; gbp_state: string; phone: string; address: string;
   } | null> => {
     try {
-      const q = encodeURIComponent(query);
-      const res = await fetchT(`https://maps.googleapis.com/maps/api/place/textsearch/json?query=${q}&key=${process.env.GOOGLE_PLACES_API_KEY}`);
-      const json = await res.json();
-      if (json.status !== "OK" || !json.results?.length) return null;
+      const { results } = await placesTextSearch(query);
+      if (!results.length) return null;
 
-      for (const place of json.results.slice(0, 3)) {
-        const details = await fetchDetails(place.place_id);
+      for (const place of results.slice(0, 3)) {
+        const details = await placeDetails(place.place_id);
         if (siteMatchesDomain(details.website)) {
           console.log(`[GBP] ✓ "${place.name}" phone="${details.phone}" city="${details.city}" state="${details.state}"`);
           return {
-            rating:       place.rating ?? 0,
-            review_count: place.user_ratings_total ?? 0,
-            place_id:     place.place_id ?? "",
-            real_name:    place.name ?? "",
+            rating:       place.rating,
+            review_count: place.user_ratings_total,
+            place_id:     place.place_id,
+            real_name:    place.name,
             gbp_city:     details.city,
             gbp_state:    details.state,
             phone:        details.phone,
@@ -73,37 +55,28 @@ export async function getLeadGBP(name: string, city: string, state: string, doma
   }
 
   try {
-    const q = encodeURIComponent(`${name} ${city} ${state}`);
-    const res = await fetchT(`https://maps.googleapis.com/maps/api/place/textsearch/json?query=${q}&key=${process.env.GOOGLE_PLACES_API_KEY}`);
-    const json = await res.json();
-    if (json.status !== "OK" || !json.results?.length) return empty;
-    const p = json.results[0];
-    const details = await fetchDetails(p.place_id);
+    const { results } = await placesTextSearch(`${name} ${city} ${state}`);
+    if (!results.length) return empty;
+    const p = results[0];
+    const details = await placeDetails(p.place_id);
     return {
-      rating: p.rating ?? 0, review_count: p.user_ratings_total ?? 0,
-      place_id: p.place_id ?? "", real_name: p.name ?? "",
-      gbp_city: '', gbp_state: '',
-      phone: details.phone, address: details.address,
+      rating:       p.rating,
+      review_count: p.user_ratings_total,
+      place_id:     p.place_id,
+      real_name:    p.name,
+      gbp_city:     '',
+      gbp_state:    '',
+      phone:        details.phone,
+      address:      details.address,
     };
   } catch { return empty; }
 }
 
 // Resolve a 2-letter state abbreviation to a full name using the Geocoding API.
-// Returns the input unchanged if it's already a full name or if the API call fails.
-/** Fetch phone number for any place_id — used to get competitor phone from Places Details. */
-export async function getPlacePhone(place_id: string): Promise<string> {
-  if (!place_id || !process.env.GOOGLE_PLACES_API_KEY) return '';
-  try {
-    const r = await fetchT(
-      `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(place_id)}&fields=formatted_phone_number&key=${process.env.GOOGLE_PLACES_API_KEY}`
-    );
-    const j = await r.json();
-    return j.result?.formatted_phone_number ?? '';
-  } catch { return ''; }
-}
-
+// The Geocoding API (maps.googleapis.com/maps/api/geocode) is NOT the Places API —
+// it has no v1 migration; keep the existing endpoint.
 export async function resolveStateName(city: string, state: string): Promise<string> {
-  if (!/^[A-Z]{2}$/i.test(state.trim())) return state; // already a full name
+  if (!/^[A-Z]{2}$/i.test(state.trim())) return state;
   try {
     const q = encodeURIComponent(`${city}, ${state}, United States`);
     const r = await fetchT(`https://maps.googleapis.com/maps/api/geocode/json?address=${q}&key=${process.env.GOOGLE_PLACES_API_KEY}`);
@@ -120,15 +93,20 @@ export async function resolveStateName(city: string, state: string): Promise<str
   return state;
 }
 
+/** Fetch phone number for any place_id. */
+export async function getPlacePhone(place_id: string): Promise<string> {
+  return placePhone(place_id);
+}
+
 export interface GBPReviewInsights {
-  replyRate: number | null;     // fraction 0–1; null when reply data is unavailable
+  replyRate: number | null;
   repliedCount: number;
   unansweredCount: number;
   totalChecked: number;
-  avgRecentRating: number;      // avg star rating of sampled reviews
-  hasUnansweredRecent: boolean; // any unanswered in sample (false when reply data unavailable)
-  replyDataAvailable: boolean;  // false when source cannot detect owner replies (Places API fallback)
-  snippets: string[];           // up to 20 snippets for Claude; reports display only 3
+  avgRecentRating: number;
+  hasUnansweredRecent: boolean;
+  replyDataAvailable: boolean;
+  snippets: string[];
 }
 
 function buildInsights(
@@ -141,8 +119,6 @@ function buildInsights(
   const avgRating       = reviews.reduce((s, r) => s + r.rating, 0) / Math.max(reviews.length, 1);
   const hasUnanswered   = replyDataAvailable && unansweredCount > 0;
 
-  // All snippets go to Claude (up to 20); reports slice to 3 for display.
-  // When reply data is unavailable (Places API fallback), omit the reply marker.
   const unanswered = replyDataAvailable ? reviews.filter(r => !r.replied && r.text.trim().length > 20) : [];
   const replied    = replyDataAvailable ? reviews.filter(r =>  r.replied && r.text.trim().length > 20) : [];
   const allText    = reviews.filter(r => r.text.trim().length > 20);
@@ -175,10 +151,6 @@ export async function getGBPReviewInsights(
   city?: string,
   state?: string,
 ): Promise<GBPReviewInsights | null> {
-  // Try DataForSEO first — uses the async task_post / task_get flow.
-  // The live/advanced endpoint does NOT exist for reviews; task_post is the correct entry point.
-  // Priority queue (priority:2) gives ~10–30s turnaround vs up to 45min for standard.
-  // depth:50 returns up to 50 reviews with owner_answer in a single task.
   if (process.env.DATAFORSEO_LOGIN) {
     try {
       const submitTask = async (body: Record<string, any>): Promise<string | null> => {
@@ -196,7 +168,6 @@ export async function getGBPReviewInsights(
         const id: string | undefined = task0?.id;
         const sc: number | undefined = task0?.status_code;
         console.log(`[GBP] DFS task_post: top=${json.status_code} task_status=${sc} task_msg="${task0?.status_message}" id=${id ?? 'none'}`);
-        // 20100 = Task Created Successfully; anything else means rejected
         if (!id || sc !== 20100) {
           console.warn(`[GBP] DFS task_post rejected or no ID — skipping poll`);
           return null;
@@ -205,7 +176,7 @@ export async function getGBPReviewInsights(
       };
 
       const pollTask = async (taskId: string): Promise<any[]> => {
-        const deadline = Date.now() + 60000; // 60s max poll
+        const deadline = Date.now() + 60000;
         let firstPoll = true;
         while (Date.now() < deadline) {
           await new Promise(r => setTimeout(r, firstPoll ? 8000 : 5000));
@@ -224,12 +195,10 @@ export async function getGBPReviewInsights(
             if (items.length > 0) {
               const keys = [...new Set(items.flatMap((i: any) => Object.keys(i)))];
               console.log(`[GBP] Review item keys: ${keys.join(', ')}`);
-              // Audit owner_answer distribution across ALL items so we can trust the reply rate
               const nullCount    = items.filter(i => i.owner_answer === null).length;
               const nonNullCount = items.filter(i => i.owner_answer != null).length;
               const timeAgoCount = items.filter(i => i.owner_time_ago != null).length;
               console.log(`[GBP] owner_answer distribution: null=${nullCount} non-null=${nonNullCount} owner_time_ago_set=${timeAgoCount}`);
-              // Show first 3 non-null owner_answer values so we can manually verify
               const withReply = items.filter(i => i.owner_answer != null).slice(0, 3);
               withReply.forEach((item, idx) => {
                 console.log(`[GBP] replied sample [${idx}]: rating=${item.rating?.value} text="${(item.review_text ?? '').substring(0, 60)}" owner_answer=${JSON.stringify(item.owner_answer)?.substring(0, 150)}`);
@@ -247,9 +216,6 @@ export async function getGBPReviewInsights(
         return [];
       };
 
-      // Resolve owner reply across DFS field name variants.
-      // Also checks owner_time_ago / owner_timestamp — if those are set, a reply exists
-      // even when owner_answer text is unavailable (DFS sometimes omits the text but keeps timing).
       const hasOwnerReply = (item: any): boolean => {
         const oa = item.owner_answer ?? item.owner_response ?? item.reply ?? item.response;
         if (oa != null) {
@@ -257,15 +223,9 @@ export async function getGBPReviewInsights(
           if (Array.isArray(oa)) return oa.length > 0 && !!(oa[0]?.text ?? oa[0]?.comment ?? '').trim();
           if (typeof oa === 'object') return !!(oa.text ?? oa.comment ?? oa.response ?? '').toString().trim();
         }
-        // Fallback: timing fields present means a reply was posted even if text field is null
         return !!(item.owner_time_ago ?? item.owner_timestamp);
       };
 
-      // DFS reviews task_post requires location_name even when using place_id.
-      // No spaces in location_name — DFS format is "City,FullStateName,Country".
-      // State abbreviations (OH, TX…) must be expanded; DFS rejects abbreviated names with 40501.
-      // resolveStateName() geocodes the city+state if needed — no static lookup table.
-      // depth:100 returns up to 100 reviews per task.
       const fullState = city && state ? await resolveStateName(city, state) : state;
       const loc = city && fullState ? `${city},${fullState},United States` : null;
       const placeReq = place_id && loc
@@ -288,10 +248,6 @@ export async function getGBPReviewInsights(
         allItems = fbId ? await pollTask(fbId) : [];
       }
 
-      // When DFS returns reviews but owner_answer is null on ALL items, it means DFS doesn't
-      // have reply data for this business (data gap, not a plan issue for text/ratings).
-      // Still use the DFS reviews for text/rating context (Claude gets up to 20 snippets),
-      // but mark replyDataAvailable:false so reports don't make false "no reply" claims.
       const itemsWithReply = allItems.filter(i => i.owner_answer != null || i.owner_response != null || i.reply != null || i.owner_time_ago != null || i.owner_timestamp != null);
       const replyDataAvailable = itemsWithReply.length > 0;
       if (allItems.length > 0 && !replyDataAvailable) {
@@ -314,11 +270,12 @@ export async function getGBPReviewInsights(
     }
   }
 
-  // Fallback: Google Places API v1 — reliable ownerResponse field (old v3 API omits replies entirely)
+  // Fallback: Google Places API v1 — up to 5 most relevant reviews.
+  // ownerResponse is not exposed in this endpoint; mark replyDataAvailable:false.
   if (!place_id || !process.env.GOOGLE_PLACES_API_KEY) return null;
   try {
     const r = await fetchT(
-      `https://places.googleapis.com/v1/places/${encodeURIComponent(place_id)}`,
+      `https://places.googleapis.com/v1/places/${place_id}`,
       {
         headers: {
           'X-Goog-Api-Key': process.env.GOOGLE_PLACES_API_KEY!,
@@ -332,13 +289,11 @@ export async function getGBPReviewInsights(
       console.warn('[GBP] Places API v1: no reviews returned for place_id:', place_id, '| response:', JSON.stringify(j).substring(0, 300));
       return null;
     }
-    // Places API v1 does not expose ownerResponse — the field is not in its schema.
-    // Pass replyDataAvailable:false so snippets don't make false "NO REPLY" claims.
     const reviews = raw
       .filter(rv => (rv.text?.text ?? rv.originalText?.text ?? '').trim().length > 10)
       .map(rv => ({
-        text:   rv.text?.text ?? rv.originalText?.text ?? '',
-        rating: rv.rating ?? 5,
+        text:    rv.text?.text ?? rv.originalText?.text ?? '',
+        rating:  rv.rating ?? 5,
         replied: false,
       }));
     console.log(`[GBP] Places API v1: ${reviews.length} reviews fetched (reply data unavailable from this endpoint)`);
@@ -387,15 +342,5 @@ export async function getGBPPostsPerWeek(
 }
 
 export async function getPlaceCoords(place_id: string): Promise<{ lat: number; lng: number } | null> {
-  if (!place_id || !process.env.GOOGLE_PLACES_API_KEY) return null;
-  try {
-    const r = await fetchT(
-      `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(place_id)}&fields=geometry&key=${process.env.GOOGLE_PLACES_API_KEY}`,
-      {}, 8000
-    );
-    const j = await r.json();
-    const loc = j.result?.geometry?.location;
-    if (loc) console.log(`[GBP] Coords for ${place_id}: ${loc.lat},${loc.lng}`);
-    return loc ? { lat: loc.lat as number, lng: loc.lng as number } : null;
-  } catch { return null; }
+  return placeCoords(place_id);
 }

@@ -1,0 +1,735 @@
+openapi: 3.0.3
+info:
+  title: ARMA Audit Engine API
+  description: |
+    GrowthScope / ARMA Audit Engine — generates local SEO audit reports for small businesses.
+
+    **Typical workflow:**
+    1. `POST /lite-report` — scores a business, locks competitor data, returns a PDF (or JSON) lite report
+    2. `POST /full-report` — deep-dive audit PDF; reads the competitor locked by step 1
+
+    **Required env vars:** `DATAFORSEO_LOGIN` + `DATAFORSEO_PASSWORD` (primary map pack source),
+    `GOOGLE_PLACES_API_KEY` (fallback), `ANTHROPIC_API_KEY` (analysis), `PAGESPEED_API_KEY` (scores).
+  version: 1.0.0
+  contact:
+    email: pankajkumar.techie@gmail.com
+
+servers:
+  - url: http://localhost:3002
+    description: Local development server
+
+tags:
+  - name: Reports
+    description: Audit report generation
+  - name: Debug
+    description: Live data inspection utilities
+  - name: Cache
+    description: Map pack cache management
+  - name: System
+    description: Health and status
+
+paths:
+
+  # ── Reports ──────────────────────────────────────────────────────────────────
+
+  /lite-report:
+    post:
+      tags: [Reports]
+      summary: Generate a Lite Audit Report
+      description: |
+        Fetches Google Business Profile data, map pack rankings (DataForSEO primary /
+        Google Places fallback), monthly traffic, and generates a cold email + PDF lite report.
+
+        **Must be run before `POST /full-report`** — persists competitor data to SQLite which
+        the full report reads for consistency.
+
+        Add `?format=json` (or `"format": "json"` in the body) to receive raw JSON instead of a PDF.
+      parameters:
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum: [json]
+          description: Return raw JSON instead of a PDF binary
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LiteReportRequest'
+            examples:
+              pdf_default:
+                summary: Roofer in Anchorage AK (returns PDF)
+                value:
+                  url: https://example-roofer.com
+                  city: Anchorage
+                  state: AK
+                  vertical: Roofing
+              json_format:
+                summary: Dallas plumber — return JSON for debugging
+                value:
+                  url: https://example-plumber.com
+                  city: Dallas
+                  state: TX
+                  vertical: Plumber
+                  format: json
+      responses:
+        '200':
+          description: |
+            Default: `application/pdf` binary with
+            `Content-Disposition: attachment; filename="ARMA_LiteCheck_<domain>.pdf"`.
+            With `format=json`: JSON object (see schema).
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiteReportResponse'
+        '400':
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "url, city, state required"
+        '502':
+          description: Could not fetch map pack rankings from any configured data source
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MapPackError'
+
+  /full-report:
+    post:
+      tags: [Reports]
+      summary: Generate a Full Audit Report
+      description: |
+        Deep-dive audit PDF. **Requires `POST /lite-report` to have been called first** for
+        the same domain — competitor data is read from SQLite for consistency.
+
+        Runs:
+        - Site crawl (Puppeteer) for lead and competitor
+        - PageSpeed Insights (mobile + desktop) for both
+        - Claude analysis (strengths, weaknesses, action plan)
+        - Trust angle computation
+        - Full-length branded PDF render
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FullReportRequest'
+            examples:
+              basic:
+                summary: Full report for a domain with an existing lite report
+                value:
+                  url: https://example-roofer.com
+      responses:
+        '200':
+          description: |
+            Full audit PDF with
+            `Content-Disposition: attachment; filename="ARMA_Audit_<domain>.pdf"`.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Missing URL or no lite report found for this domain
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                no_url:
+                  value: { error: "url required" }
+                no_lite:
+                  value: { error: "No Lite Report found. Call POST /lite-report first." }
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── Debug ────────────────────────────────────────────────────────────────────
+
+  /mappack-debug:
+    get:
+      tags: [Debug]
+      summary: Inspect Map Pack Rankings
+      description: |
+        Returns Google Maps pack positions for a vertical + city, showing exactly what
+        the audit engine uses in reports.
+
+        **Source priority:**
+        1. SQLite cache (populated during real audit runs — exact data used in the last report)
+        2. DataForSEO SERP Maps live (if `DATAFORSEO_LOGIN` env var is set)
+        3. Google Places API v1 text search (approximate prominence order, not guaranteed Map Pack rank)
+
+        Pass `bust=1` to clear the cache for this keyword/city/state and force a fresh fetch.
+      parameters:
+        - in: query
+          name: vertical
+          required: true
+          schema:
+            type: string
+          description: Business vertical / service category
+          example: Roofing
+        - in: query
+          name: city
+          required: true
+          schema:
+            type: string
+          description: City name
+          example: Anchorage
+        - in: query
+          name: state
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 2
+          description: Two-letter US state abbreviation
+          example: AK
+        - in: query
+          name: bust
+          schema:
+            type: string
+            enum: ['1']
+          description: Pass `1` to clear the cache entry and force a live fetch
+      responses:
+        '200':
+          description: Map pack positions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MapPackDebugResponse'
+              example:
+                vertical: Roofing
+                city: Anchorage
+                state: AK
+                source: cache (fetched 2026-06-08 07:00:00)
+                note: Cached data from the audit engine — these ranks are exactly what was used in the last report.
+                count: 5
+                positions:
+                  - rank: 1
+                    name: ABC Roofing
+                    rating: 4.8
+                    reviews: 312
+                    place_id: ChIJXXXXXXXXXX
+                    maps_url: https://www.google.com/maps/place/?q=place_id:ChIJXXXXXXXXXX
+        '400':
+          description: Missing required query params
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "vertical, city, state required"
+        '500':
+          description: No data sources configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /pagespeed-check:
+    get:
+      tags: [Debug]
+      summary: Check PageSpeed Scores
+      description: |
+        Runs Google PageSpeed Insights for the given URL on **both** mobile and desktop,
+        regardless of the `strategy` param. Results are cached in SQLite; pass `bust=1`
+        to force a fresh API call.
+      parameters:
+        - in: query
+          name: url
+          required: true
+          schema:
+            type: string
+            format: uri
+          description: Full URL to test
+          example: https://example.com
+        - in: query
+          name: strategy
+          schema:
+            type: string
+            enum: [mobile, desktop]
+            default: mobile
+          description: Hint only — both strategies are always returned
+        - in: query
+          name: bust
+          schema:
+            type: string
+            enum: ['1', 'true']
+          description: Pass `1` or `true` to bypass the SQLite cache
+      responses:
+        '200':
+          description: PageSpeed scores for mobile and desktop
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageSpeedResponse'
+        '400':
+          description: Missing URL or invalid strategy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── System ───────────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      tags: [System]
+      summary: Health Check
+      description: Returns server health and quick counts from the SQLite database.
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                leads_in_db: 42
+                mappack_cache_live: 7
+
+  # ── Cache ────────────────────────────────────────────────────────────────────
+
+  /cache-status:
+    get:
+      tags: [Cache]
+      summary: Map Pack Cache Status
+      description: Lists all entries in the map pack cache with their age in hours.
+      responses:
+        '200':
+          description: Cache entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CacheStatusResponse'
+
+  /cache-clear:
+    delete:
+      tags: [Cache]
+      summary: Clear Map Pack Cache
+      description: |
+        Deletes map pack cache entries.
+        - Provide `keyword + city + state` to clear a single entry.
+        - Omit all params to clear **every** cache entry.
+      parameters:
+        - in: query
+          name: keyword
+          schema:
+            type: string
+          description: Vertical keyword (e.g. `Roofing`)
+        - in: query
+          name: city
+          schema:
+            type: string
+          description: City name
+        - in: query
+          name: state
+          schema:
+            type: string
+          description: State abbreviation
+      responses:
+        '200':
+          description: Number of cleared entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CacheClearResponse'
+              examples:
+                single:
+                  value:
+                    cleared: 1
+                    entry: "Roofing / Anchorage, AK"
+                all:
+                  value:
+                    cleared: 14
+                    message: "All map pack cache entries deleted"
+
+# ── Components ────────────────────────────────────────────────────────────────
+
+components:
+  schemas:
+
+    # ── Shared ──────────────────────────────────────────────────────────────────
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    MapPackError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        keywords_tried:
+          type: array
+          items:
+            type: string
+          description: Keywords the engine attempted before failing
+        search_location:
+          type: string
+          description: City + state that was searched
+
+    # ── Request bodies ───────────────────────────────────────────────────────────
+
+    LiteReportRequest:
+      type: object
+      required: [url, city, state]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Full URL of the lead's website
+          example: https://example-roofer.com
+        city:
+          type: string
+          description: City where the business operates
+          example: Anchorage
+        state:
+          type: string
+          description: Two-letter US state abbreviation
+          example: AK
+        vertical:
+          type: string
+          description: Business vertical / service category. Defaults to `"Home Services"` if omitted.
+          example: Roofing
+        format:
+          type: string
+          enum: [json]
+          description: Return raw JSON instead of a PDF binary
+
+    FullReportRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Full URL of the lead's website (domain must match an existing lite report in SQLite)
+          example: https://example-roofer.com
+
+    # ── Map pack ─────────────────────────────────────────────────────────────────
+
+    MapPackPosition:
+      type: object
+      properties:
+        rank:
+          type: integer
+          description: Position in the map pack (1 = top result)
+        name:
+          type: string
+        rating:
+          type: number
+          format: float
+        reviews:
+          type: integer
+        place_id:
+          type: string
+          nullable: true
+        maps_url:
+          type: string
+          format: uri
+          nullable: true
+        data_source:
+          type: string
+          description: Present only in cache responses (`dataforseo_maps` or `google_places`)
+
+    MapPackDebugResponse:
+      type: object
+      properties:
+        vertical:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        source:
+          type: string
+          description: |
+            Where the data came from:
+            - `cache (fetched <timestamp>)` — SQLite cache from a real audit run
+            - `dataforseo_maps_live` — live DataForSEO SERP Maps API
+            - `google_places_v1_live` — live Google Places text search (approximate)
+        note:
+          type: string
+        count:
+          type: integer
+        positions:
+          type: array
+          items:
+            $ref: '#/components/schemas/MapPackPosition'
+
+    # ── PageSpeed ────────────────────────────────────────────────────────────────
+
+    PageSpeedResult:
+      type: object
+      properties:
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Performance score
+        lcp:
+          type: string
+          description: Largest Contentful Paint (e.g. `"2.5 s"`)
+        cls:
+          type: string
+          description: Cumulative Layout Shift
+        is_fallback:
+          type: boolean
+          description: True if the score could not be fetched and a fallback value was used
+        cached:
+          type: boolean
+          description: True if served from SQLite cache
+
+    PageSpeedResponse:
+      type: object
+      properties:
+        url:
+          type: string
+        tested_at:
+          type: string
+          format: date-time
+        mobile:
+          $ref: '#/components/schemas/PageSpeedResult'
+        desktop:
+          $ref: '#/components/schemas/PageSpeedResult'
+        note:
+          type: string
+
+    # ── Health / Cache ───────────────────────────────────────────────────────────
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        leads_in_db:
+          type: integer
+          description: Total leads in the SQLite `leads` table
+        mappack_cache_live:
+          type: integer
+          description: Cache entries fresher than 24 hours
+
+    CacheEntry:
+      type: object
+      properties:
+        keyword:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        fetched_at:
+          type: string
+          format: date-time
+        age_hours:
+          type: number
+          format: float
+
+    CacheStatusResponse:
+      type: object
+      properties:
+        count:
+          type: integer
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CacheEntry'
+
+    CacheClearResponse:
+      type: object
+      properties:
+        cleared:
+          type: integer
+          description: Number of SQLite rows deleted
+        message:
+          type: string
+          description: Present when all entries were cleared
+        entry:
+          type: string
+          description: Present when a specific `keyword / city, state` entry was cleared
+
+    # ── Lite report JSON response ────────────────────────────────────────────────
+
+    RankingKeyword:
+      type: object
+      properties:
+        keyword:
+          type: string
+        position:
+          type: integer
+
+    RevenueData:
+      type: object
+      properties:
+        monthly_loss:
+          type: integer
+          description: Estimated monthly revenue loss from missed rankings (USD)
+        annual_loss:
+          type: integer
+          description: Estimated annual revenue loss (USD)
+
+    ColdEmail:
+      type: object
+      properties:
+        subject:
+          type: string
+        body:
+          type: string
+
+    ReviewInsights:
+      type: object
+      nullable: true
+      properties:
+        repliedCount:
+          type: integer
+        unansweredCount:
+          type: integer
+        totalChecked:
+          type: integer
+        replyRate:
+          type: number
+          format: float
+        replyDataAvailable:
+          type: boolean
+        snippets:
+          type: array
+          items:
+            type: string
+          maxItems: 3
+
+    LeadData:
+      type: object
+      properties:
+        name:
+          type: string
+        rating:
+          type: number
+          format: float
+        review_count:
+          type: integer
+        place_id:
+          type: string
+          nullable: true
+        gbp_url:
+          type: string
+          format: uri
+          nullable: true
+        position:
+          type: integer
+          description: Weighted Google Maps pack position
+        organic_position:
+          type: integer
+          nullable: true
+          description: Organic SERP position for the primary keyword
+        position_by_keyword:
+          type: array
+          items:
+            $ref: '#/components/schemas/RankingKeyword'
+        phone:
+          type: string
+        address:
+          type: string
+        owner:
+          type: string
+          description: Owner name extracted from the homepage by Claude
+        service_area:
+          type: string
+          description: Service area extracted from the homepage by Claude
+
+    CompetitorData:
+      type: object
+      properties:
+        name:
+          type: string
+        rating:
+          type: number
+          format: float
+        review_count:
+          type: integer
+        position:
+          type: integer
+        domain:
+          type: string
+          nullable: true
+        place_id:
+          type: string
+          nullable: true
+        phone:
+          type: string
+        owner:
+          type: string
+        service_area:
+          type: string
+        gbp_url:
+          type: string
+          format: uri
+          nullable: true
+
+    LiteReportResponse:
+      type: object
+      description: Returned only when `format=json` is passed
+      properties:
+        domain:
+          type: string
+        city:
+          type: string
+        state:
+          type: string
+        vertical:
+          type: string
+        niche_matched:
+          type: string
+          description: Canonical niche key matched to internal benchmark data
+        search_location:
+          type: string
+          example: "Anchorage, AK"
+        lead:
+          $ref: '#/components/schemas/LeadData'
+        competitor:
+          $ref: '#/components/schemas/CompetitorData'
+        fullPack:
+          type: array
+          items:
+            type: object
+          description: All businesses returned in the map pack query
+        traffic_monthly:
+          type: integer
+          nullable: true
+          description: Estimated monthly organic traffic (SimilarWeb / SemRush)
+        revenue:
+          $ref: '#/components/schemas/RevenueData'
+        review_insights:
+          $ref: '#/components/schemas/ReviewInsights'
+        position_data_source:
+          type: string
+          description: Which source provided the map pack data
+        ranking_method:
+          type: string
+          example: exact_google_maps
+        ranking_keywords:
+          type: array
+          items:
+            $ref: '#/components/schemas/RankingKeyword'
+        gap_summary:
+          type: string
+          description: One-line summary of the rank gap vs the top competitor
+        cold_email:
+          $ref: '#/components/schemas/ColdEmail'
