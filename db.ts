@@ -145,6 +145,16 @@ if (!db.prepare(`SELECT 1 FROM migrations WHERE name='flush_mappack_gmaps_scrape
   console.log('[DB] Migration: flushed mappack_cache (direct Google Maps scrape as primary source)');
 }
 
+// Migration v12: flush cache — Maps scrape switched from direct /maps/search/ URL
+// navigation to typing the query into the search box. URL navigation returned a
+// server-rendered ranking that no real browser reproduces (reordered #2–#7 vs
+// manual checks); the typed interactive search matches what users actually see.
+if (!db.prepare(`SELECT 1 FROM migrations WHERE name='flush_mappack_typed_search'`).get()) {
+  db.prepare(`DELETE FROM mappack_cache`).run();
+  db.prepare(`INSERT INTO migrations (name) VALUES ('flush_mappack_typed_search')`).run();
+  console.log('[DB] Migration: flushed mappack_cache (typed-search Maps scrape)');
+}
+
 // Migration v5: drop redundant lead_id column (was always equal to domain).
 if (!db.prepare(`SELECT 1 FROM migrations WHERE name='drop_lead_id_column'`).get()) {
   const cols: any[] = db.prepare(`PRAGMA table_info(leads)`).all();

@@ -22,6 +22,11 @@ export function buildMapsSearchUrl(vertical: string, city: string, lat: number, 
   return `https://www.google.com/maps/search/${q}/@${lat},${lng},11z?hl=en`;
 }
 
+// Bare Maps viewport URL (no search) — starting point for the typed-search flow.
+function buildMapsHomeUrl(lat: number, lng: number): string {
+  return `https://www.google.com/maps/@${lat},${lng},11z?hl=en`;
+}
+
 // "1.8K" → 1800, "1,846" → 1846
 function parseCount(s: string): number {
   const t = s.replace(/,/g, '').trim();
@@ -35,15 +40,39 @@ export async function scrapeMapsPack(
   coords: { lat: number; lng: number },
   maxResults = 20,
 ): Promise<GmapsPackResult | null> {
-  const mapsUrl = buildMapsSearchUrl(vertical, city, coords.lat, coords.lng);
+  const query = `${vertical.toLowerCase()} in ${city.toLowerCase()}`;
+  let mapsUrl = buildMapsSearchUrl(vertical, city, coords.lat, coords.lng);
   let browser;
   try {
     browser = await puppeteer.launch(await puppeteerOpts());
     const page = await browser.newPage();
     await page.setUserAgent(CRAWL_UA);
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     await page.setViewport({ width: 1280, height: 1000 });
-    await page.goto(mapsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    // Type the query into the Maps search box instead of navigating straight to a
+    // /maps/search/ URL. Direct URL navigation returns a server-rendered ranking
+    // that real browsers never see (verified Jun 2026: it reordered #2–#7 vs every
+    // real browser, signed-in or private). The interactive search hits the same
+    // live endpoint a human's keystroke does and matches manual checks.
+    let typed = false;
+    try {
+      await page.goto(buildMapsHomeUrl(coords.lat, coords.lng), { waitUntil: 'domcontentloaded', timeout: 60000 });
+      // Google renames the box id periodically (#searchboxinput → #ucc-1); name="q" is stable.
+      const box = await page.waitForSelector('input[name="q"], input#searchboxinput', { timeout: 20000 });
+      await new Promise(r => setTimeout(r, 1500));
+      await box!.click();
+      await page.type('input[name="q"], input#searchboxinput', query, { delay: 60 });
+      await page.keyboard.press('Enter');
+      typed = true;
+    } catch (e: any) {
+      console.warn(`[Gmaps] typed-search flow failed (${e.message.slice(0, 60)}) — falling back to URL navigation`);
+      await page.goto(mapsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    }
     await page.waitForSelector('div[role="feed"]', { timeout: 25000 });
+    // The post-search URL carries the real data/g_ep params — store it as the
+    // verification link so opening it reproduces this exact ranking.
+    if (typed && page.url().includes('/maps/search/')) mapsUrl = page.url();
 
     // Scroll the results feed until we have enough cards (Maps lazy-loads ~7 at a time).
     for (let i = 0; i < 8; i++) {
