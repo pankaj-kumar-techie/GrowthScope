@@ -116,7 +116,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
   }).catch(() => ({
     subject: `${realName} — quick visibility check for ${searchCity}`,
     body: weightedPosition === 1
-      ? `${realName} holds the #1 spot on Google Maps for '${niche}' in ${searchCity} right now — but ${competitor.name} is right behind at #2 with ${competitor.review_count} reviews vs your ${gbp.review_count}. One algorithm update or review push from them and that position flips. I put together a short brief on what's protecting your lead — and what's not. Reply and I'll send the full breakdown.`
+      ? `${realName} holds the #1 spot on Google Maps for '${niche}' in ${searchCity} right now — but ${competitor.name} is right behind at #${competitor.position} with ${competitor.review_count} reviews vs your ${gbp.review_count}. One algorithm update or review push from them and that position flips. I put together a short brief on what's protecting your lead — and what's not. Reply and I'll send the full breakdown.`
       : `I ran a quick Google Maps check on ${realName} and found you at #${weightedPosition} while ${competitor.name} holds #${competitor.position} — a gap worth roughly $${revenue.monthly_loss.toLocaleString()}/month in missed calls. I put together a short brief with the numbers (attached). If you'd like the full audit with the exact steps to close that gap, just reply and I'll send it over.`,
   }));
 
@@ -132,9 +132,10 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
       ? { ...reviewInsights, snippets: reviewInsights.snippets.slice(0, 3) }
       : null,
     position_data_source: primaryMapData.dataSource,
-    ranking_method:       "exact_google_maps",
+    ranking_method:       "google_maps_snapshot",
     ranking_keywords:     rankingKeywords,
-    gap_summary: `${realName} at #${weightedPosition} vs ${competitor.name} at #${competitor.position} in ${searchCity} (exact Google Maps ranking).`,
+    verification_url:     primaryMapData.verificationUrl,
+    gap_summary: `${realName} at #${weightedPosition} vs ${competitor.name} at #${competitor.position} in ${searchCity} (live Google Maps snapshot — open verification_url to see the exact same search; rankings shift with time and searcher location).`,
     cold_email: coldEmail,
   };
 
@@ -166,6 +167,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     revenue,
     fullPack:   primaryMapData.fullPack,
     rankingKeywords,
+    verificationUrl: primaryMapData.verificationUrl,
     coldEmail,
   });
 

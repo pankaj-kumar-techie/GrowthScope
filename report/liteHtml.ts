@@ -54,11 +54,12 @@ export interface LiteReportParams {
   revenue: { loss_low_usd: number; loss_high_usd: number; monthly_loss: number };
   fullPack: any[];
   rankingKeywords: Array<{ keyword: string; position: number | null }>;
+  verificationUrl: string;
   coldEmail: { subject: string; body: string };
 }
 
 export function generateLiteReportHTML(p: LiteReportParams): string {
-  const { lead, competitor, city, state, vertical, revenue, fullPack, coldEmail } = p;
+  const { lead, competitor, city, state, vertical, revenue, fullPack, verificationUrl, coldEmail } = p;
 
   const date        = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).toUpperCase();
   const clientName  = esc(lead.name.toUpperCase());
@@ -73,11 +74,15 @@ export function generateLiteReportHTML(p: LiteReportParams): string {
 
   const headline  = pickHeadline(lead.position, competitor.name, lead.review_count, competitor.review_count, competitor.position);
   const isTop     = lead.position === 1;
+  // The challenger's edge: review volume when they have more reviews, rating otherwise.
+  const compEdge  = (competitor.review_count || 0) > (lead.review_count || 0)
+    ? `${(competitor.review_count||0).toLocaleString()} reviews vs your ${(lead.review_count||0).toLocaleString()}`
+    : `a ${(competitor.rating||0).toFixed(1)}★ rating vs your ${(lead.rating||0).toFixed(1)}★`;
   const heroSub   = isTop
-    ? `We checked your Google Maps footprint for '${verticalEsc}' in ${cityEsc}. You hold #1 — but ${esc(competitor.name.split(' ')[0])} is right behind at #2 with ${(competitor.review_count||0).toLocaleString()} reviews vs your ${(lead.review_count||0).toLocaleString()}. Here's what's keeping you there — and what could knock you off.`
+    ? `We checked your Google Maps footprint for '${verticalEsc}' in ${cityEsc}. You hold #1 — but ${esc(competitor.name.split(' ')[0])} is right behind at #${competitor.position} with ${compEdge}. Here's what's keeping you there — and what could knock you off.`
     : `We followed your customer's path — from Google search to phone call — and flagged where you lose them.`;
   const gapCopy   = isTop
-    ? `You currently hold #1 for '${verticalEsc}' searches in ${cityEsc}. But ${compName} at #2 has ${(competitor.review_count||0).toLocaleString()} reviews vs your ${(lead.review_count||0).toLocaleString()} — a narrowing gap. Without active optimization, that lead flips fast. Protecting it is worth an estimated $${revenue.loss_low_usd.toLocaleString()}–$${revenue.loss_high_usd.toLocaleString()}/month in recurring revenue.`
+    ? `You currently hold #1 for '${verticalEsc}' searches in ${cityEsc}. But ${compName} at #${competitor.position} has ${compEdge} — a narrow lead. Without active optimization, that position flips fast. Protecting it is worth an estimated $${revenue.loss_low_usd.toLocaleString()}–$${revenue.loss_high_usd.toLocaleString()}/month in recurring revenue.`
     : `${compName} at #${competitor.position} captures the majority of '${verticalEsc} ${cityEsc}' searches. Being at #${lead.position > 20 ? '>20' : lead.position} means most of those calls go elsewhere — an estimated $${revenue.loss_low_usd.toLocaleString()}–$${revenue.loss_high_usd.toLocaleString()}/month in missed revenue.`;
   const fix03Title = isTop
     ? `A Plan to Defend Your #1 Spot &amp; Widen the Lead on ${compName.split(' ')[0]}`
@@ -228,6 +233,7 @@ body{font-family:'Outfit',sans-serif;-webkit-print-color-adjust:exact;print-colo
     <div class="map-list">
       ${mapRows}
     </div>
+    <p style="font-size:10px;color:#999;margin:-8px 0 14px;">See this list yourself: <a href="${esc(verificationUrl)}" style="color:#999;">search "${verticalEsc} in ${cityEsc}" on Google Maps</a>. Rankings shift with time and the searcher's location — this is a live snapshot, not a fixed score.</p>
 
     <div class="math">
       <div class="math-lbl">${isTop ? 'What Losing This Spot Costs' : 'What This Gap Costs'}</div>
@@ -235,7 +241,7 @@ body{font-family:'Outfit',sans-serif;-webkit-print-color-adjust:exact;print-colo
     </div>
 
     <div class="lbl" style="margin-bottom:10px;">What the Full Audit Covers</div>
-    <div class="fix"><div class="fn">01</div><div><div class="ft">${isTop ? `What's Keeping You at #1 — and What Could Push You Down` : `Why ${compName} Outranks You — and the Exact Fixes`}</div><div class="fb">${isTop ? `A full comparison of your Google profile vs. ${compName} at #2. We identify every gap they could exploit to take your spot — before they do.` : `A page-by-page breakdown of every gap on your site and Google profile vs. the #${competitor.position} competitor. Specific, numbered action steps — not vague advice.`}</div></div></div>
+    <div class="fix"><div class="fn">01</div><div><div class="ft">${isTop ? `What's Keeping You at #1 — and What Could Push You Down` : `Why ${compName} Outranks You — and the Exact Fixes`}</div><div class="fb">${isTop ? `A full comparison of your Google profile vs. ${compName} at #${competitor.position}. We identify every gap they could exploit to take your spot — before they do.` : `A page-by-page breakdown of every gap on your site and Google profile vs. the #${competitor.position} competitor. Specific, numbered action steps — not vague advice.`}</div></div></div>
     <div class="fix"><div class="fn">02</div><div><div class="ft">Website Speed, Trust &amp; Conversion Analysis</div><div class="fb">We test your site the same way your customer's phone does. You'll see exactly where visitors drop off before ever calling — and how to fix it fast.</div></div></div>
     <div class="fix"><div class="fn">03</div><div><div class="ft">${fix03Title}</div><div class="fb">${esc(coldEmail.body)}</div></div></div>
   </div>

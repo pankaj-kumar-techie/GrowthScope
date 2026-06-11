@@ -168,7 +168,8 @@ ABSOLUTE RULES:
 8. ONLY reference ${lead.name} and ${competitor.name} by name. Never name any other business from the full pack in fix descriptions or body text.
 6. NEVER recommend adding GBP posts if alreadyPostingWeekly=true — pick a different GBP fix.
 7. NEVER recommend adding click-to-call or phone visibility improvements if phoneAboveFoldMobile=true — pick a different page3 fix.
-9. NEVER recommend adding/creating something the LEAD CRAWL booleans show already exists — if hasServiceAreaPages, hasBookingForm, hasEmergencyMessaging, hasFinancing, hasTrustBadges, hasReviewsOnHome, hasStickyCTA, or hasAboveFoldCTA is true, that thing is already on the site, so do not suggest adding it. Pick a fix for something the data shows is actually missing or weak instead.`;
+9. NEVER recommend adding/creating something the LEAD CRAWL booleans show already exists — if hasServiceAreaPages, hasBookingForm, hasEmergencyMessaging, hasFinancing, hasTrustBadges, hasReviewsOnHome, hasStickyCTA, or hasAboveFoldCTA is true, that thing is already on the site, so do not suggest adding it. Pick a fix for something the data shows is actually missing or weak instead.
+10. NO DUPLICATE TOPICS: page5_issues must be about problems NOT already raised in page2_fixes or page3_fixes. If GBP posting frequency, financing visibility, review responses, etc. is already a fix on page 2 or 3, do not raise that same topic again on page 5 under different wording — pick a different gap instead.`;
 
   const prompt = `REAL DATA. USE ONLY THESE:
 Lead: ${lead.name} | ${city}, ${state} | Vertical: ${vertical}
@@ -250,7 +251,7 @@ Output this JSON (all fix arrays must have EXACTLY 3 items):
 
 page5_issues candidates (only issues not already used on pages 2–4) — use whichever of these are true:
 noServiceArea:${!crawl.hasServiceAreaPages} | noBookingForm:${!crawl.hasBookingForm} | noEmergency:${!crawl.hasEmergencyMessaging} | noFinancing:${!crawl.hasFinancing} | domainMismatch:${crawl.hasDomainMismatch}
-If fewer than 2 of those are true, the site already covers the content basics — fill the remaining slot(s) with GBP profile gaps instead, which always apply: low GBP photo count (recommend 30+ recent geo-tagged job photos), and ${alreadyPostingWeekly ? 'adding GBP Q&A seeded with the 5 most common buyer questions (postsPerWeek already healthy)' : `posting to GBP weekly (postsPerWeek:${gbpPostsPerWeek != null ? gbpPostsPerWeek.toFixed(1) : 'unknown'}, not yet weekly)`}.`;
+If fewer than 2 of those are true, the site already covers the content basics — fill the remaining slot(s) with GBP profile gaps instead, which always apply and must not restate any page2/page3 fix: low GBP photo count (recommend 30+ recent geo-tagged job photos), and adding GBP Q&A seeded with the 5 most common buyer questions. Do not propose GBP posting frequency here — that topic belongs on page 2 only.`;
 
   // Attach screenshots for visual verification — Claude overrides any DOM boolean
   // that contradicts what's actually visible on screen (e.g. phone in banner text).
@@ -311,11 +312,7 @@ export function buildFallback(p: any) {
   if (!crawl.hasFinancing && p5.length < 2) p5.push({ letter: p5.length === 0 ? "A" : "B", title: "No Financing Options: Losing High-Ticket Jobs", body: `For jobs over $2,000, financing closes deals that price-shoppers walk from. Competitors who offer pay-over-time win the job before you even get a callback.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}–$${Math.round(revenue.monthly_loss * 0.2).toLocaleString()}/mo at risk` });
   if (p5.length === 0) {
     p5.push({ letter: "A", title: "GBP Photos Below Standard", body: `Google rewards profiles with 30 or more recent photos. If ${competitor.name} posts more than you, they earn ranking signals you are handing them for free.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}/mo at risk` });
-    if (!alreadyPostingWeekly) {
-      p5.push({ letter: "B", title: "No Weekly GBP Posts", body: `GBP posts are a free ranking signal. Competitors posting weekly get preference in the map pack. Not posting is a gift to your competition.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}/mo at risk` });
-    } else {
-      p5.push({ letter: "B", title: "Add GBP Q&A to Capture Buyer Questions", body: `Seed your GBP Q&A with the 5 most common questions homeowners ask before booking. These surface in search results and filter out tire-kickers before they ever reach ${competitor.name}.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}/mo at risk` });
-    }
+    p5.push({ letter: "B", title: "Add GBP Q&A to Capture Buyer Questions", body: `Seed your GBP Q&A with the 5 most common questions homeowners ask before booking. These surface in search results and filter out tire-kickers before they ever reach ${competitor.name}.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}/mo at risk` });
   }
 
   const page3Fixes = (() => {

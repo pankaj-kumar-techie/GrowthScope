@@ -2,13 +2,14 @@ import { fetchT } from '../lib/http';
 import db from '../db';
 import { dfsAuth } from '../lib/auth';
 import { resolveStateName } from '../services/gbp';
-import { placesTextSearch, placeWebsite, type PlaceResult } from '../lib/places';
+import { placesTextSearch, placeWebsite, placeRatingCount, type PlaceResult } from '../lib/places';
+import { scrapeMapsPack } from './gmaps';
 
 // Neutral Google experiment-params token for Maps fallback searches.
 const MAPS_G_EP = 'Egdnd3Mtd2l6IgFoKgIIAEgAUABYAHAAeACQAQCYAQCgAQCqAQC4AQPIAQCYAgCgAgCYAwCSBwCgBwCyBwC4BwDCBwDIBwCACAE';
 
 // Builds the Google Search verification URL — short form matches what users actually type.
-function buildSearchUrl(vertical: string, city: string): string {
+export function buildSearchUrl(vertical: string, city: string): string {
   const q = encodeURIComponent(`${vertical.toLowerCase()} in ${city.toLowerCase()}`).replace(/%20/g, '+');
   return `https://www.google.com/search?q=${q}&udm=1`;
 }
@@ -25,7 +26,7 @@ async function getMapsPackFromDFS(
   vertical: string,
   city: string,
   state: string,
-): Promise<{ places: PlaceResult[]; source: string } | null> {
+): Promise<{ places: PlaceResult[]; source: string; checkUrl: string } | null> {
   if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) return null;
   const fullState = await resolveStateName(city, state);
   const locationName = `${city},${fullState},United States`;
@@ -35,8 +36,11 @@ async function getMapsPackFromDFS(
 
   // Primary: local_finder scrapes Google Search Places tab (matches manual verification on udm=1).
   // Use "vertical in city" WITHOUT state — matches exactly what a user types when searching.
-  // location_coordinate handles geo-disambiguation, avoiding the 40501 "Invalid Field" error
-  // that occurs when keyword has city name AND location_name is also provided.
+  // location_name: 'United States' (country-level, no coordinate) makes Google return the broad
+  // relevance-ranked "Places" page for the named city — the same results a non-local searcher
+  // (e.g. the agency, checking from outside the lead's city) sees. A city-specific
+  // location_coordinate/location_name instead returns a proximity-anchored "near me" pack, which
+  // doesn't match manual verification checks.
   // Secondary: Maps endpoint URL scrape — reliable, returns place_ids, but different surface.
   const shortQuery  = `${vertical.toLowerCase()} in ${city.toLowerCase()}`;
   const searchQuery = `${vertical.toLowerCase()} in ${city.toLowerCase()} ${fullState.toLowerCase()}`;
@@ -45,11 +49,9 @@ async function getMapsPackFromDFS(
       endpoint: 'serp/google/local_finder/live/advanced',
       body: {
         keyword: shortQuery,
-        ...(coords
-          ? { location_coordinate: `${coords.lat},${coords.lng}` }
-          : { location_name: locationName }),
+        location_name: 'United States',
         language_name: 'English',
-        depth: 10,
+        depth: 20,
       },
       label: 'dataforseo_local_finder',
       timeout: 90000,
@@ -82,6 +84,9 @@ async function getMapsPackFromDFS(
         console.warn(`[MapPack] DFS ${label} status ${task0?.status_code}: ${task0?.status_message}`);
         continue;
       }
+      // check_url is the exact Google URL DFS scraped (location pinned via uule) —
+      // opening it reproduces this snapshot far better than a plain search URL.
+      const checkUrl: string = task0?.result?.[0]?.check_url ?? '';
       const rawItems: any[] = task0?.result?.[0]?.items ?? [];
       const typeCounts = rawItems.reduce((m: any, i: any) => { m[i.type] = (m[i.type] ?? 0) + 1; return m; }, {});
       console.log(`[MapPack] ${label} raw ${rawItems.length} items, types:`, JSON.stringify(typeCounts));
@@ -126,7 +131,7 @@ async function getMapsPackFromDFS(
       places.forEach((p, i) =>
         console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total} place_id:${p.place_id || 'none'}`)
       );
-      return { places, source: label };
+      return { places, source: label, checkUrl };
     } catch (e: any) {
       console.warn(`[MapPack] DFS ${label} error:`, e.message);
     }
@@ -140,12 +145,15 @@ export interface MapPackConfig {
   excludedBrands?: string[];
 }
 
+//  Lead #1    → compare with #2 (closest challenger)
 //  Lead #2–4  → compare with #1
 //  Lead #5–8  → compare with #3
 //  Lead #9–13 → compare with #4
 //  Lead #14+  → compare with #5
+// Returned rank counts NON-LEAD entries: when the lead is #1, the 1st non-lead
+// entry is overall #2 — so leads #1–4 all target rank 1. (Returning 2 here used
+// to skip past the real #2 and pick the overall #3 as "closest challenger".)
 function pickCompetitorRank(leadPos: number): number {
-  if (leadPos <= 1)  return 2;
   if (leadPos <= 4)  return 1;
   if (leadPos <= 8)  return 3;
   if (leadPos <= 13) return 4;
@@ -208,6 +216,7 @@ export type MapPackResult = {
     place_id: string | null; gbp_url: string | null; isLead: boolean; isCompetitor: boolean;
   }>;
   dataSource: string;
+  verificationUrl: string;
   competitor: {
     name: string; rating: number; review_count: number; position: number;
     domain: string; place_id: string; gbp_url: string | null;
@@ -228,43 +237,63 @@ export async function getMapPackPosition(
 
   const cacheKey = vertical.toLowerCase();
 
-  // ── Cache (24-hour TTL) ──────────────────────────────────────────────────────
+  // ── Cache (6-hour TTL — rankings shift intraday; keep snapshots close to what a
+  // manual verification check sees) ────────────────────────────────────────────
   let places: PlaceResult[];
   let dataSource: string;
+  let checkUrl = '';
 
   const cached: any = db.prepare(
-    `SELECT items_json FROM mappack_cache WHERE keyword=? AND city=? AND state=? AND fetched_at>datetime('now','-24 hours')`
+    `SELECT items_json FROM mappack_cache WHERE keyword=? AND city=? AND state=? AND fetched_at>datetime('now','-6 hours')`
   ).get(cacheKey, city, state);
 
   if (cached) {
-    places = JSON.parse(cached.items_json);
+    const parsed = JSON.parse(cached.items_json);
+    // Legacy rows stored a bare places array; current rows store { checkUrl, places }.
+    places = Array.isArray(parsed) ? parsed : parsed.places;
+    checkUrl = Array.isArray(parsed) ? '' : (parsed.checkUrl ?? '');
     dataSource = 'cached';
     console.log(`[MapPack] Cache hit: "${vertical} ${city}" (${places.length} results)`);
   } else {
-    // Primary: DataForSEO Local Finder — matches "HVAC Toledo" Google Search results
-    const dfsResult = await getMapsPackFromDFS(vertical, city, state);
-    if (dfsResult) {
-      places = dfsResult.places;
-      dataSource = dfsResult.source;
-    } else {
-      // Fallback: Google Places text search (less accurate — ranks by relevance, not proximity)
-      const query = `${vertical} ${city}`;
-      console.log(`[MapPack] DFS unavailable — falling back to Google Places for "${query}"`);
-      const coords = await geocodeCity(city, state);
-      places = await searchPlaces(query, coords ?? undefined);
-      if (!places.length) {
-        console.error(`[MapPack] No results for "${query}" — check GOOGLE_PLACES_API_KEY quota`);
-        return null;
-      }
-      dataSource = 'google_places';
-      console.log(`[MapPack] Google Places: ${places.length} results`);
+    // Primary: direct Google Maps scrape — the exact list a prospect sees when they
+    // search "hvac in toledo" on Google Maps. The scraped URL doubles as the
+    // verification link, so opening it reproduces this ranking.
+    const coords = await geocodeCity(city, state);
+    const gmaps = coords ? await scrapeMapsPack(vertical, city, coords) : null;
+    if (gmaps) {
+      places = gmaps.places;
+      dataSource = 'google_maps';
+      checkUrl = gmaps.mapsUrl;
       places.forEach((p, i) =>
-        console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total} place_id:${p.place_id}`)
+        console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total} place_id:${p.place_id || 'none'}`)
       );
+    } else {
+      // Fallback 1: DataForSEO Local Finder (Google Search Places tab — different surface,
+      // close but not identical ordering to Maps).
+      const dfsResult = await getMapsPackFromDFS(vertical, city, state);
+      if (dfsResult) {
+        places = dfsResult.places;
+        dataSource = dfsResult.source;
+        checkUrl = dfsResult.checkUrl;
+      } else {
+        // Fallback 2: Google Places text search (least accurate — ranks by relevance).
+        const query = `${vertical} ${city}`;
+        console.log(`[MapPack] Maps scrape + DFS unavailable — falling back to Google Places for "${query}"`);
+        places = await searchPlaces(query, coords ?? undefined);
+        if (!places.length) {
+          console.error(`[MapPack] No results for "${query}" — check GOOGLE_PLACES_API_KEY quota`);
+          return null;
+        }
+        dataSource = 'google_places';
+        console.log(`[MapPack] Google Places: ${places.length} results`);
+        places.forEach((p, i) =>
+          console.log(`  #${i + 1} "${p.name}" reviews:${p.user_ratings_total} place_id:${p.place_id}`)
+        );
+      }
     }
     db.prepare(
       `INSERT OR REPLACE INTO mappack_cache (keyword,city,state,items_json) VALUES (?,?,?,?)`
-    ).run(cacheKey, city, state, JSON.stringify(places));
+    ).run(cacheKey, city, state, JSON.stringify({ checkUrl, places }));
   }
 
   // ── Find lead ────────────────────────────────────────────────────────────────
@@ -344,6 +373,7 @@ export async function getMapPackPosition(
     const found = await searchPlaces(`${compPlace.name} ${city} ${state}`, coords ?? undefined);
     compPlaceId = found.find(p => p.name.toLowerCase() === compPlace.name.toLowerCase())?.place_id
       || found[0]?.place_id || '';
+    if (compPlaceId) compPlace.place_id = compPlaceId;
   }
 
   // Competitor website
@@ -366,6 +396,19 @@ export async function getMapPackPosition(
     .filter(p => !mustItems.includes(p))
     .slice(0, Math.max(0, 5 - mustItems.length));
   const packPlaces = [...mustItems, ...fillers].sort((a, b) => places.indexOf(a) - places.indexOf(b));
+
+  // The scraped Maps list view sometimes omits review counts — enrich the
+  // report-visible entries via Places API and write back to the cache so the
+  // lookups aren't repeated on the next hit.
+  const toEnrich = packPlaces.filter(p => p.place_id && (!p.user_ratings_total || !p.rating));
+  if (toEnrich.length) {
+    await Promise.all(toEnrich.map(async p => {
+      const rc = await placeRatingCount(p.place_id);
+      if (rc) { p.rating = rc.rating; p.user_ratings_total = rc.count; }
+    }));
+    db.prepare(`UPDATE mappack_cache SET items_json=? WHERE keyword=? AND city=? AND state=?`)
+      .run(JSON.stringify({ checkUrl, places }), cacheKey, city, state);
+  }
 
   const fullPack = packPlaces.map(place => {
     const pid = place === leadPlaceResult ? leadActualPid
@@ -396,7 +439,10 @@ export async function getMapPackPosition(
   const inPack = leadPos <= 3 ? ' ✓ IN TOP-3 MAP PACK' : leadPos <= 10 ? ' (top 10)' : '';
   console.log(`[MapPack] Google Maps rank: #${leadPos}${inPack} for "${vertical} ${city}" (source: ${dataSource})`);
 
-  const primaryMapData: MapPackResult = { leadPosition: leadPos, fullPack, dataSource, competitor };
+  // Prefer the DFS check_url (location-pinned, reproduces the exact scraped SERP);
+  // fall back to a plain Google search URL when the data came from Places API.
+  const verificationUrl = checkUrl || buildSearchUrl(vertical, city);
+  const primaryMapData: MapPackResult = { leadPosition: leadPos, fullPack, dataSource, verificationUrl, competitor };
   return { primaryMapData, leadPosition: leadPos };
 }
 
@@ -420,7 +466,8 @@ export async function getWeightedPosition(
   return {
     primaryMapData:  result.primaryMapData,
     weightedPosition: result.leadPosition,
-    rankingKeywords: [{ keyword: `${vertical} ${city}`, position: result.leadPosition }],
+    // Report the query actually sent to Google ("hvac in toledo"), not "HVAC Toledo".
+    rankingKeywords: [{ keyword: `${vertical.toLowerCase()} in ${city.toLowerCase()}`, position: result.leadPosition }],
   };
 }
 

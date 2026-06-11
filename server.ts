@@ -32,9 +32,15 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: err.message || 'Server error' });
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`\n🚀 ARMA Audit Engine ready: http://localhost:${PORT}`);
-  console.log(`   POST /lite-report  { url, city, state, vertical }`);
-  console.log(`   POST /full-report  { url }\n`);
-});
-server.setTimeout(300000);
+// On Vercel, the app is invoked as a serverless function via the default export
+// below — app.listen() would bind to a port nothing connects to.
+if (!process.env.VERCEL) {
+  const server = app.listen(PORT, () => {
+    console.log(`\n🚀 ARMA Audit Engine ready: http://localhost:${PORT}`);
+    console.log(`   POST /lite-report  { url, city, state, vertical }`);
+    console.log(`   POST /full-report  { url }\n`);
+  });
+  server.setTimeout(300000);
+}
+
+export default app;

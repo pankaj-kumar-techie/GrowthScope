@@ -119,6 +119,20 @@ export async function placeDetails(place_id: string): Promise<PlaceDetails> {
   } catch { return empty; }
 }
 
+// GET /v1/places/{id} — rating + review count only (enriches scraped Maps results,
+// whose list view sometimes omits the review count).
+export async function placeRatingCount(place_id: string): Promise<{ rating: number; count: number } | null> {
+  if (!apiKey() || !place_id) return null;
+  try {
+    const res = await fetchT(`${BASE}/places/${place_id}`, {
+      headers: { 'X-Goog-Api-Key': apiKey(), 'X-Goog-FieldMask': 'rating,userRatingCount' },
+    }, 8000);
+    const j = await res.json();
+    if (j.error) return null;
+    return { rating: j.rating ?? 0, count: j.userRatingCount ?? 0 };
+  } catch { return null; }
+}
+
 // GET /v1/places/{id} — websiteUri only (for competitor domain lookup).
 export async function placeWebsite(place_id: string): Promise<string> {
   if (!apiKey() || !place_id) return '';

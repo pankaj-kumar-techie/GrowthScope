@@ -2,7 +2,11 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
-const db = new Database(path.join(__dirname, 'audits.db'));
+// Vercel's filesystem is read-only except /tmp, and audits.db (gitignored) isn't
+// part of the deployment bundle — open it from /tmp there so the app can boot.
+// Note: /tmp is ephemeral, so leads/cache data won't persist across cold starts on Vercel.
+const dbPath = process.env.VERCEL ? '/tmp/audits.db' : path.join(__dirname, 'audits.db');
+const db = new Database(dbPath);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS leads (
@@ -120,6 +124,25 @@ if (!db.prepare(`SELECT 1 FROM migrations WHERE name='flush_mappack_short_keywor
   db.prepare(`DELETE FROM mappack_cache`).run();
   db.prepare(`INSERT INTO migrations (name) VALUES ('flush_mappack_short_keyword')`).run();
   console.log('[DB] Migration: flushed mappack_cache (short keyword for local_finder)');
+}
+
+// Migration v10: flush cache — local_finder location switched from city-anchored
+// (location_coordinate / city location_name → "near me" proximity pack) to
+// location_name: 'United States' (broad relevance-ranked Places page). This matches
+// manual verification checks performed from outside the lead's city.
+if (!db.prepare(`SELECT 1 FROM migrations WHERE name='flush_mappack_us_location'`).get()) {
+  db.prepare(`DELETE FROM mappack_cache`).run();
+  db.prepare(`INSERT INTO migrations (name) VALUES ('flush_mappack_us_location')`).run();
+  console.log('[DB] Migration: flushed mappack_cache (local_finder location_name → United States)');
+}
+
+// Migration v11: flush cache — primary source switched to direct Google Maps scrape
+// (services/gmaps.ts). Cached local_finder rows are from the Search Places tab, a
+// different surface with different ordering.
+if (!db.prepare(`SELECT 1 FROM migrations WHERE name='flush_mappack_gmaps_scrape'`).get()) {
+  db.prepare(`DELETE FROM mappack_cache`).run();
+  db.prepare(`INSERT INTO migrations (name) VALUES ('flush_mappack_gmaps_scrape')`).run();
+  console.log('[DB] Migration: flushed mappack_cache (direct Google Maps scrape as primary source)');
 }
 
 // Migration v5: drop redundant lead_id column (was always equal to domain).
