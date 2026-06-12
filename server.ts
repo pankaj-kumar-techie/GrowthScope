@@ -18,6 +18,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const swaggerDoc = yaml.load(fs.readFileSync(path.join(__dirname, 'swagger.yaml'), 'utf8')) as object;
 // Vercel's serverless bundle omits the swagger-ui-dist static assets, so load
@@ -38,6 +39,21 @@ app.get('/docs.json', (_req, res) => res.json(swaggerDoc));
 
 app.use('/lite-report', liteReportRouter);
 app.use('/full-report', fullReportRouter);
+
+app.get('/', (req, res) => {
+  const accept = req.headers.accept || '';
+  if (accept.includes('text/html')) {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  } else {
+    res.json({
+      name: 'ARMA Audit Engine',
+      status: 'healthy',
+      docs: '/docs',
+      openapi: '/docs.json'
+    });
+  }
+});
+
 app.use('/', utilityRouter);
 
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ARMA Audit Engine Playground</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+
+  <header>
+    <div class="logo-container">
+      <div class="logo-icon">
+        <i class="fa-solid fa-gauge-high" style="color: white; font-size: 1.1rem;"></i>
+      </div>
+      <div>
+        <span class="logo-text">ARMA</span>
+        <span class="logo-badge">Audit Engine v1.0</span>
+      </div>
+    </div>
+    <div class="status-indicator">
+      <span class="status-dot" id="health-dot"></span>
+      <span id="health-text">Checking server...</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Navigation and Controls -->
+    <div class="sidebar">
+      <div class="navigation-tabs">
+        <button class="tab-btn active" data-tab="lite-tab">
+          <i class="fa-solid fa-bolt"></i>
+          <span>Lite Audit</span>
+        </button>
+        <button class="tab-btn" data-tab="full-tab">
+          <i class="fa-solid fa-file-contract"></i>
+          <span>Full Audit</span>
+        </button>
+        <button class="tab-btn" data-tab="tools-tab">
+          <i class="fa-solid fa-sliders"></i>
+          <span>Diagnostics</span>
+        </button>
+      </div>
+
+      <!-- Tab 1 Panel: Lite Report -->
+      <div id="lite-tab" class="panel active">
+        <div class="panel-header">
+          <h2 class="panel-title">
+            <i class="fa-solid fa-bolt" style="color: var(--primary);"></i>
+            Lite Report Generator
+          </h2>
+          <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">
+            Pulls basic GBP positioning, reviews, local ranking keyword comparison, and builds cold email templates.
+          </p>
+        </div>
+
+        <form id="lite-form">
+          <div class="form-group">
+            <label for="lite-url">Website URL</label>
+            <div class="input-wrapper">
+              <i class="fa-solid fa-link"></i>
+              <input type="url" id="lite-url" class="form-input" placeholder="https://example.com" required>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="lite-city">City</label>
+              <div class="input-wrapper">
+                <i class="fa-solid fa-city"></i>
+                <input type="text" id="lite-city" class="form-input" placeholder="e.g. Anchorage" required>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="lite-state">State Code</label>
+              <div class="input-wrapper">
+                <i class="fa-solid fa-map-pin"></i>
+                <input type="text" id="lite-state" class="form-input" placeholder="e.g. AK" maxlength="2" style="text-transform: uppercase;" required>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="lite-vertical">Vertical / Niche (Optional)</label>
+            <div class="input-wrapper">
+              <i class="fa-solid fa-briefcase"></i>
+              <input type="text" id="lite-vertical" class="form-input" placeholder="e.g. Roofing (Defaults to Home Services)">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Output Format</label>
+            <div class="toggle-group">
+              <button type="button" class="toggle-btn active" data-format="pdf">PDF Report</button>
+              <button type="button" class="toggle-btn" data-format="json">Raw JSON</button>
+            </div>
+          </div>
+
+          <button type="submit" class="action-btn" id="lite-submit">
+            <i class="fa-solid fa-wand-magic-sparkles"></i>
+            <span>Generate Lite Audit</span>
+          </button>
+        </form>
+      </div>
+
+      <!-- Tab 2 Panel: Full Report -->
+      <div id="full-tab" class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">
+            <i class="fa-solid fa-file-contract" style="color: var(--primary);"></i>
+            Full Report Generator
+          </h2>
+          <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">
+            Deep crawlers, Google PageSpeed, full review audit, Google Maps analysis, and Claude AI reports.
+          </p>
+        </div>
+
+        <div style="background: rgba(99, 102, 241, 0.1); border: 1px dashed var(--primary); padding: 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; line-height: 1.4; color: #a5b4fc; margin-bottom: 0.5rem;">
+          <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
+          <strong>Prerequisite:</strong> You must successfully generate a <strong>Lite Report</strong> for the domain first to establish the target in the database.
+        </div>
+
+        <form id="full-form">
+          <div class="form-group">
+            <label for="full-url">Website URL</label>
+            <div class="input-wrapper">
+              <i class="fa-solid fa-link"></i>
+              <input type="url" id="full-url" class="form-input" placeholder="https://example.com" required>
+            </div>
+          </div>
+
+          <button type="submit" class="action-btn" id="full-submit">
+            <i class="fa-solid fa-fire"></i>
+            <span>Generate Full Audit PDF</span>
+          </button>
+        </form>
+      </div>
+
+      <!-- Tab 3 Panel: Diagnostics and settings (static in list) -->
+      <div id="tools-tab" class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">
+            <i class="fa-solid fa-sliders" style="color: var(--primary);"></i>
+            Quick Diagnostics
+          </h2>
+          <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">
+            Direct API tools for checking search engines, testing speed, and database status.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label>Cache Management</label>
+          <button type="button" class="btn-secondary" id="clear-all-cache-btn" style="text-align: left; display: flex; align-items: center; gap: 0.5rem;">
+            <i class="fa-solid fa-trash-can" style="color: var(--danger);"></i>
+            Clear All Map Pack Cache
+          </button>
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 0.5rem 0;">
+
+        <!-- Direct PageSpeed Check -->
+        <form id="speed-check-form" style="display: flex; flex-direction: column; gap: 0.75rem;">
+          <h4 style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary);">Test Google PageSpeed</h4>
+          <div class="form-group">
+            <div class="input-wrapper">
+              <i class="fa-solid fa-bolt-lightning"></i>
+              <input type="url" id="speed-url" class="form-input" placeholder="https://example.com" required style="padding-left: 2rem;">
+            </div>
+          </div>
+          <button type="submit" class="btn-secondary" id="speed-submit-btn">
+            <i class="fa-solid fa-gauge-high"></i> Run PageSpeed Check
+          </button>
+        </form>
+
+        <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 0.5rem 0;">
+
+        <!-- Live Map Pack Debugger -->
+        <form id="mappack-debug-form" style="display: flex; flex-direction: column; gap: 0.75rem;">
+          <h4 style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary);">Map Pack Live Debugger</h4>
+          <div class="form-group">
+            <label for="debug-vertical">Vertical</label>
+            <div class="input-wrapper">
+              <i class="fa-solid fa-briefcase"></i>
+              <input type="text" id="debug-vertical" class="form-input" placeholder="e.g. Roofing" required style="padding-left: 2rem;">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="debug-city">City</label>
+              <div class="input-wrapper">
+                <i class="fa-solid fa-city"></i>
+                <input type="text" id="debug-city" class="form-input" placeholder="e.g. Anchorage" required style="padding-left: 2rem;">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="debug-state">State</label>
+              <div class="input-wrapper">
+                <i class="fa-solid fa-map-pin"></i>
+                <input type="text" id="debug-state" class="form-input" placeholder="e.g. AK" required maxlength="2" style="padding-left: 2rem; text-transform: uppercase;">
+              </div>
+            </div>
+          </div>
+          <button type="submit" class="btn-secondary" id="debug-submit-btn">
+            <i class="fa-solid fa-map"></i> Run MapPack Debug
+          </button>
+        </form>
+      </div>
+
+      <!-- Terminal logs (Always visible at the bottom of the sidebar) -->
+      <div class="terminal-card">
+        <div class="terminal-header">
+          <div class="terminal-dots">
+            <span class="t-dot red"></span>
+            <span class="t-dot yellow"></span>
+            <span class="t-dot green"></span>
+          </div>
+          <span class="terminal-title">system.log</span>
+        </div>
+        <div class="terminal-body" id="terminal-body">
+          <div class="log-entry info"><span class="log-time">03:13:00</span><span class="log-msg">Audit Engine Playground initialized. Ready for commands.</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Content Area (Viewers) -->
+    <div class="content-area">
+      <div class="viewer-card">
+        <div class="viewer-header">
+          <div class="viewer-title">
+            <i class="fa-solid fa-eye" id="viewer-type-icon" style="color: var(--primary);"></i>
+            <span id="viewer-title-text">Workspace Viewer</span>
+          </div>
+          <div class="viewer-actions" id="viewer-actions" style="display: none;">
+            <button class="icon-btn" id="copy-json-btn" title="Copy JSON Response" style="display: none;">
+              <i class="fa-regular fa-copy"></i>
+            </button>
+            <button class="icon-btn" id="download-pdf-btn" title="Download PDF" style="display: none;">
+              <i class="fa-solid fa-download"></i>
+            </button>
+            <button class="icon-btn" id="clear-viewer-btn" title="Clear Workspace">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="viewer-body" id="viewer-body">
+          <!-- Placeholder State -->
+          <div class="placeholder-view" id="viewer-placeholder">
+            <i class="fa-solid fa-folder-open placeholder-icon"></i>
+            <h3>No Report Loaded</h3>
+            <p>Fill out the parameters in the control panel on the left and hit generate. PDF or JSON outputs will appear right here.</p>
+          </div>
+
+          <!-- PDF Viewer Frame -->
+          <iframe id="pdf-iframe" style="display: none;"></iframe>
+
+          <!-- JSON Pre Viewer -->
+          <pre id="json-pre" style="display: none;"></pre>
+
+          <!-- Diagnostic Tab Content (Displays inside viewer) -->
+          <div class="diagnostic-grid" id="diagnostic-grid" style="display: none;">
+            <!-- Health & Info Card -->
+            <div class="diag-card">
+              <div class="diag-header">
+                <span class="diag-title"><i class="fa-solid fa-heartbeat" style="color: var(--secondary)"></i> System Status</span>
+              </div>
+              <div class="health-stats">
+                <div class="health-stat-box">
+                  <div class="health-stat-value" id="leads-count">-</div>
+                  <div class="health-stat-label">Total Leads Saved</div>
+                </div>
+                <div class="health-stat-box">
+                  <div class="health-stat-value" id="cache-count">-</div>
+                  <div class="health-stat-label">Live Cache Entries</div>
+                </div>
+              </div>
+              <button class="btn-secondary" id="refresh-status-btn">
+                <i class="fa-solid fa-rotate"></i> Refresh Diagnostics
+              </button>
+            </div>
+
+            <!-- Cache Entries list -->
+            <div class="diag-card">
+              <div class="diag-header">
+                <span class="diag-title"><i class="fa-solid fa-database" style="color: var(--accent)"></i> Map Pack Cache</span>
+              </div>
+              <div class="cache-list" id="cache-list-container">
+                <div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 1rem;">No cache data loaded. Click Refresh below.</div>
+              </div>
+              <button class="btn-secondary" id="refresh-cache-btn">
+                <i class="fa-solid fa-arrows-rotate"></i> Reload Cache List
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -18,14 +18,17 @@ export const CRAWL_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 
 export const puppeteerOpts = async () => {
   const isProd = process.env.NODE_ENV === "production";
-  if (isProd) return {
+  const envExec = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
+  const exec = [envExec, "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+    "/snap/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
+    .find(p => p && fs.existsSync(p));
+  // No system Chrome (or explicitly prod/serverless) → use the @sparticuz/chromium
+  // binary bundled in node_modules instead of failing.
+  if (isProd || !exec) return {
     args: [...(chromium as any).args, ...BASE_ARGS],
     executablePath: await (chromium as any).executablePath(),
     headless: true as const,
   };
-  const exec = ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
-    "/snap/bin/chromium", "/usr/bin/chromium-browser"].find(p => fs.existsSync(p));
-  if (!exec) throw new Error("Chrome not found locally. Set NODE_ENV=production.");
   return {
     args: BASE_ARGS,
     executablePath: exec,
