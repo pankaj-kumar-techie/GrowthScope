@@ -42,7 +42,12 @@ app.use('/full-report', fullReportRouter);
 
 app.get('/', (req, res) => {
   const accept = req.headers.accept || '';
-  if (accept.includes('text/html')) {
+  const userAgent = req.headers['user-agent'] || '';
+  
+  // Prevent any browser or CDN/proxy caching for the root path
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+
+  if (accept.includes('text/html') || userAgent.includes('Mozilla')) {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   } else {
     res.json({
