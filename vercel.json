@@ -1,9 +1,12 @@
 {
-  "version": 2,
-  "builds": [
-    { "src": "server.ts", "use": "@vercel/node" }
-  ],
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.ts": {
+      "maxDuration": 300,
+      "includeFiles": "swagger.yaml"
+    }
+  },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/server.ts" }
+    { "source": "/(.*)", "destination": "/api" }
   ]
 }

@@ -20,7 +20,20 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const swaggerDoc = yaml.load(fs.readFileSync(path.join(__dirname, 'swagger.yaml'), 'utf8')) as object;
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc));
+// Vercel's serverless bundle omits the swagger-ui-dist static assets, so load
+// the UI from a CDN instead of relying on swaggerUi.serve's express.static.
+const SWAGGER_CDN = 'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.6';
+app.use(
+  '/docs',
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerDoc, {
+    customCssUrl: `${SWAGGER_CDN}/swagger-ui.min.css`,
+    customJs: [
+      `${SWAGGER_CDN}/swagger-ui-bundle.js`,
+      `${SWAGGER_CDN}/swagger-ui-standalone-preset.js`,
+    ],
+  })
+);
 app.get('/docs.json', (_req, res) => res.json(swaggerDoc));
 
 app.use('/lite-report', liteReportRouter);
