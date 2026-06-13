@@ -48,6 +48,20 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
 
   console.log(`[LiteReport] Competitor: "${competitor.name}" #${competitor.position} · ${competitor.rating}★ · ${competitor.review_count} reviews (source: ${primaryMapData.dataSource})`);
 
+  // The rank was measured on whichever Google surface produced verificationUrl — Maps
+  // (…/maps/…) or the local results inside Google Search. Label all copy to match that
+  // surface so a client verifying on the *other* one isn't misled (see report/liteHtml.ts).
+  const onMaps       = /google\.com\/maps/.test(primaryMapData.verificationUrl);
+  const surfaceLabel = onMaps ? 'Google Maps' : "Google's local search results";
+
+  // Safeguard: a real local business almost always appears somewhere in the top-20 for its
+  // own category. If the lead isn't found at all, the vertical is probably wrong for this
+  // business (e.g. an insulation company audited under the wrong niche) — flag it loudly so
+  // the report isn't sent as a bogus "you're invisible" before someone double-checks.
+  const leadNotFound = weightedPosition >= 99;
+  if (leadNotFound)
+    console.warn(`[LiteReport] ⚠ "${matchName}" NOT FOUND in the "${niche} in ${searchCity}" pack (rank >20). If this business clearly operates in ${searchCity}, the vertical "${niche}" is likely wrong — verify the category before sending this report.`);
+
   const { key: niche_matched } = findBenchmark(niche);
   const revenue     = calculateRevenueLoss(traffic || 200, niche);
   const realName    = gbp.real_name && gbp.real_name.length > 2 ? gbp.real_name : bizName;
@@ -135,7 +149,8 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     ranking_method:       "google_maps_snapshot",
     ranking_keywords:     rankingKeywords,
     verification_url:     primaryMapData.verificationUrl,
-    gap_summary: `${realName} at #${weightedPosition} vs ${competitor.name} at #${competitor.position} in ${searchCity} (live Google Maps snapshot — open verification_url to see the exact same search; rankings shift with time and searcher location).`,
+    ...(leadNotFound ? { data_quality_warning: `"${matchName}" was not found in the top-20 for "${niche} in ${searchCity}". The vertical is likely wrong for this business — verify the category before sending.` } : {}),
+    gap_summary: `${realName} at #${weightedPosition > 20 ? '>20' : weightedPosition} vs ${competitor.name} at #${competitor.position} in ${searchCity} (live ${surfaceLabel} snapshot — open verification_url to see the exact same search; Maps and the local pack in Google Search rank separately and shift with time/searcher location).`,
     cold_email: coldEmail,
   };
 

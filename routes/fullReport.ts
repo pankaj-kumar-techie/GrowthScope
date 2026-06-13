@@ -77,6 +77,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     screenshotDesktop: crawl.screenshotDesktop,
     screenshotMobile: crawl.screenshotMobile,
     gbpReviewResponseRate: reviewInsights?.replyRate ?? null,
+    gbpPostsPerWeek: gbpPostsPerWeek ?? null,
     reviewInsights: reviewInsights ? { repliedCount: reviewInsights.repliedCount, unansweredCount: reviewInsights.unansweredCount, totalChecked: reviewInsights.totalChecked, replyRate: reviewInsights.replyRate, replyDataAvailable: reviewInsights.replyDataAvailable, snippets: reviewInsights.snippets } : null,
   });
 

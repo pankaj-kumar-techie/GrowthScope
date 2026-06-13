@@ -38,6 +38,7 @@ export function generateReportHTML(params: {
   analysis: any; trust: TrustAngle;
   fullPack: any[]; screenshotDesktop: string; screenshotMobile: string;
   gbpReviewResponseRate?: number | null;
+  gbpPostsPerWeek?: number | null;
   reviewInsights?: { repliedCount: number; unansweredCount: number; totalChecked: number; replyRate: number | null; replyDataAvailable?: boolean; snippets?: string[] } | null;
 }) {
   const { lead, competitor, city, state, vertical, speed, crawl, revenue, analysis, trust, fullPack } = params;
@@ -59,24 +60,55 @@ export function generateReportHTML(params: {
   const p3Rows: any[] = analysis.page3_table_rows || [];
   const p3Fixes: any[] = (analysis.page3_fixes || []).slice(0, 3);
   const p4Fixes = [
-    { num: "01", title: trust.angle === "reviews_paradox" ? "Embed Live Google Reviews on Homepage" : "Launch a 30-Day Review Drive", body: trust.angle === "reviews_paradox" ? `Use EmbedSocial or Elfsight to pull your ${lead.review_count} Google reviews onto your homepage. Install takes 1 hour. Visitors see proof before they scroll.` : `Text every customer from the last 60 days. Ask for a Google review. 30 days of asking gets 20–40 new reviews. Each one closes the gap with ${compName}.`, impact: "+15–35% trust conversion" },
-    { num: "02", title: `Put Your ${lead.rating}★ Rating in the Header`, body: `Put your rating right next to your phone number at the top of every page. Visitors see authority before they read anything. Free. Takes 20 minutes.`, impact: "+8–15% contact rate" },
+    { num: "01", title: trust.angle === "reviews_paradox" ? "Embed Live Google Reviews on Homepage" : "Launch a 30-Day Review Drive", body: trust.angle === "reviews_paradox" ? `Use EmbedSocial or Elfsight to pull your ${lead.review_count} Google reviews onto your homepage. Install takes 1 hour. Visitors see proof before they scroll.` : `Text every customer from the last 60 days. Ask for a Google review. 30 days of asking gets 20–40 new reviews. Each one closes the gap with ${compName}.`, metric: trust.angle === "reviews_paradox" ? "reviews_on_home" : "review_gap" },
+    { num: "02", title: `Put Your ${lead.rating}★ Rating in the Header`, body: `Put your rating right next to your phone number at the top of every page. Visitors see authority before they read anything. Free. Takes 20 minutes.`, metric: "rating" },
     (() => {
       const ri = params.reviewInsights;
       const clearlyNotResponding = ri != null && ri.replyDataAvailable !== false && ri.totalChecked >= 10 && ri.replyRate !== null && ri.replyRate < 0.15;
       const hasUnansweredButGenerally = !clearlyNotResponding && ri != null && ri.unansweredCount > 0 && ri.replyRate !== null && ri.replyRate >= 0.5;
       if (clearlyNotResponding) {
-        return { num: "03", title: "Respond to Every Google Review", body: `Unanswered reviews signal neglect to Google and homeowners reading your profile. Block one hour, respond to every open review. Google rewards active profiles with higher map pack visibility.`, impact: "+5–10% GBP ranking" };
+        return { num: "03", title: "Respond to Every Google Review", body: `Unanswered reviews signal neglect to Google and homeowners reading your profile. Block one hour, respond to every open review. Google rewards active profiles with higher map pack visibility.`, metric: "reply_rate" };
       }
       if (hasUnansweredButGenerally) {
         const n = ri!.unansweredCount;
-        return { num: "03", title: `Reply to Your ${n} Unanswered Review${n !== 1 ? 's' : ''}`, body: `You respond to most reviews — a strong signal to Google. But ${n} review${n !== 1 ? 's are' : ' is'} still waiting. Homeowners read the newest reviews first. A quick reply on each one keeps your profile looking active and attentive.`, impact: "+3–8% trust signal" };
+        return { num: "03", title: `Reply to Your ${n} Unanswered Review${n !== 1 ? 's' : ''}`, body: `You respond to most reviews — a strong signal to Google. But ${n} review${n !== 1 ? 's are' : ' is'} still waiting. Homeowners read the newest reviews first. A quick reply on each one keeps your profile looking active and attentive.`, metric: "reply_rate" };
       }
-      return { num: "03", title: "Add 20+ Recent Photos to Your Google Business Profile", body: `Google rewards profiles with recent, geo-tagged job photos. Post before/after shots from real jobs in ${cityEsc}. Profiles with 20+ photos average higher map pack placement and more profile views than those with fewer than 10.`, impact: "+5–15% map visibility" };
+      return { num: "03", title: "Add 20+ Recent Photos to Your Google Business Profile", body: `Google rewards profiles with recent, geo-tagged job photos. Post before/after shots from real jobs in ${cityEsc}. Profiles with 20+ photos average higher map pack placement and more profile views than those with fewer than 10.`, metric: "gbp_posts" };
     })(),
   ];
   const p5Issues: any[] = analysis.page5_issues || [];
-  const trafficEst = Math.round((params.revenue.current_revenue || 0) / Math.max(params.revenue.avg_ticket, 1) / Math.max(params.revenue.cvr_typical / 100, 0.01));
+
+  // Every fix/issue carries a `metric` naming a REAL measured data point (not an invented
+  // uplift %). renderImpact turns it into a factual "current state" badge straight from the
+  // live API/crawl values already in scope. Unknown/blank metric → no badge (we never print
+  // a number we didn't measure). This replaced fabricated "+X–Y%" impact claims.
+  const phoneMobile = crawl.hasPhoneAboveFoldMobile ?? crawl.hasPhoneAboveFold;
+  const ri4 = params.reviewInsights;
+  const impactFromMetric = (metric?: string): string => {
+    switch (metric) {
+      case 'mobile_speed':    return speed?.score != null ? `Now: mobile speed ${speed.score}/100` : '';
+      case 'mobile_lcp':      return speed?.lcp ? `Now: mobile load ${speed.lcp}` : '';
+      case 'phone_mobile':    return `Now: phone ${phoneMobile ? 'shown above the fold' : 'not above the fold (mobile)'}`;
+      case 'sticky_cta':      return `Now: sticky call bar ${crawl.hasStickyCTA ? 'present' : 'missing'}`;
+      case 'reviews_on_home': return `Now: reviews on homepage ${crawl.hasReviewsOnHome ? 'shown' : 'not shown'}`;
+      case 'trust_badges':    return `Now: trust badges ${crawl.hasTrustBadges ? 'present' : 'missing'}`;
+      case 'service_area':    return `Now: service-area pages ${crawl.hasServiceAreaPages ? 'present' : 'none found'}`;
+      case 'booking_form':    return `Now: online quote form ${crawl.hasBookingForm ? 'present' : 'none found'}`;
+      case 'financing':       return `Now: financing info ${crawl.hasFinancing ? 'present' : 'none found'}`;
+      case 'emergency':       return `Now: 24/7 messaging ${crawl.hasEmergencyMessaging ? 'present' : 'none found'}`;
+      case 'review_gap':      return `Now: ${lead.review_count} reviews vs ${competitor.review_count} for ${esc(String(competitor.name || '').split(' ')[0])}`;
+      case 'reply_rate':      return ri4?.replyRate != null ? `Now: ${Math.round(ri4.replyRate * 100)}% of reviews answered`
+                                   : ri4?.unansweredCount ? `Now: ${ri4.unansweredCount} unanswered review${ri4.unansweredCount !== 1 ? 's' : ''}` : '';
+      case 'gbp_posts':       return params.gbpPostsPerWeek != null ? `Now: ${params.gbpPostsPerWeek.toFixed(1)} GBP posts/week` : '';
+      case 'map_position':    return `Now: #${lead.position > 20 ? '>20' : lead.position} on the map pack`;
+      case 'rating':          return `Now: ${lead.rating}★ rating`;
+      default:                return '';
+    }
+  };
+  const renderImpact = (f: any, cls: 'fi' | 'ii' = 'fi'): string => {
+    const t = impactFromMetric(f?.metric);
+    return t ? `<div class="${cls}">${esc(t)}</div>` : '';
+  };
 
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <style>
@@ -267,7 +299,7 @@ td.win{color:#1a6b3a;font-weight:700;} td.loss{color:#D0202E;font-weight:700;}
     </div>
 
     <div class="lbl" style="margin-bottom:9px;">How to Fix It</div>
-    ${p2Fixes.map((f: any) => `<div class="fix"><div class="fn">${f.num || '01'}</div><div><div class="ft">${f.title}</div><div class="fb">${f.body}</div>${f.impact ? `<div class="fi">${f.impact}</div>` : ''}</div></div>`).join('')}
+    ${p2Fixes.map((f: any) => `<div class="fix"><div class="fn">${f.num || '01'}</div><div><div class="ft">${f.title}</div><div class="fb">${f.body}</div>${renderImpact(f)}</div></div>`).join('')}
   </div>
   <div class="footer"><span>PREPARED FOR ${clientName} · ${cityEsc}, ${stateEsc}</span><span>PAGE 2 OF 6</span></div>
 </div>
@@ -301,7 +333,7 @@ td.win{color:#1a6b3a;font-weight:700;} td.loss{color:#D0202E;font-weight:700;}
     </div>
 
     <div class="lbl" style="margin-bottom:9px;">How to Fix It</div>
-    ${p3Fixes.map((f: any) => `<div class="fix"><div class="fn">${f.num || '01'}</div><div><div class="ft">${f.title}</div><div class="fb">${f.body}</div>${f.impact ? `<div class="fi">${f.impact}</div>` : ''}</div></div>`).join('')}
+    ${p3Fixes.map((f: any) => `<div class="fix"><div class="fn">${f.num || '01'}</div><div><div class="ft">${f.title}</div><div class="fb">${f.body}</div>${renderImpact(f)}</div></div>`).join('')}
   </div>
   <div class="footer"><span>PREPARED FOR ${clientName} · ${cityEsc}, ${stateEsc}</span><span>PAGE 3 OF 6</span></div>
 </div>
@@ -350,11 +382,11 @@ td.win{color:#1a6b3a;font-weight:700;} td.loss{color:#D0202E;font-weight:700;}
 
     <div class="math" style="margin-bottom:16px;">
       <div class="math-lbl">The Math</div>
-      <div class="math-txt">Sites with embedded reviews convert up to 35% better. On ${leadNameEsc}'s ~${Math.max(trafficEst, 200)} visitors/month, hiding your ${lead.review_count} reviews costs an estimated $${Math.round(revenue.monthly_loss * 0.35).toLocaleString()}/month.</div>
+      <div class="math-txt">Your homepage doesn't surface your ${lead.review_count} Google reviews or ${lead.rating}★ rating up front, while ${compName} carries ${competitor.review_count} reviews. Visitors who can't see proof before they scroll are more likely to leave for a competitor — part of the estimated revenue gap quantified on page 5.</div>
     </div>
 
     <div class="lbl" style="margin-bottom:9px;">How to Close the Trust Gap</div>
-    ${p4Fixes.map((f: any) => `<div class="fix"><div class="fn">${f.num}</div><div><div class="ft">${f.title}</div><div class="fb">${f.body}</div>${f.impact ? `<div class="fi">${f.impact}</div>` : ''}</div></div>`).join('')}
+    ${p4Fixes.map((f: any) => `<div class="fix"><div class="fn">${f.num}</div><div><div class="ft">${f.title}</div><div class="fb">${f.body}</div>${renderImpact(f)}</div></div>`).join('')}
   </div>
   <div class="footer"><span>PREPARED FOR ${clientName} · ${cityEsc}, ${stateEsc}</span><span>PAGE 4 OF 6</span></div>
 </div>
@@ -372,7 +404,7 @@ td.win{color:#1a6b3a;font-weight:700;} td.loss{color:#D0202E;font-weight:700;}
           <div class="il">Issue ${i.letter}</div>
           <div class="it">${i.title}</div>
           <div class="ib">${i.body}</div>
-          ${i.impact ? `<div class="ii">${i.impact}</div>` : ''}
+          ${renderImpact(i, 'ii')}
         </div>`).join('')}
     </div>
     <div class="combined">

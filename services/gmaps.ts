@@ -86,7 +86,8 @@ export async function scrapeMapsPack(
       await new Promise(r => setTimeout(r, 1200));
     }
 
-    const raw: Array<{ name: string; href: string; text: string; ratingAria: string }> = await page.evaluate(() => {
+    type RawCard = { name: string; href: string; text: string; ratingAria: string };
+    const extractRaw = (): Promise<RawCard[]> => page.evaluate(() => {
       const out: Array<{ name: string; href: string; text: string; ratingAria: string }> = [];
       document.querySelectorAll('div[role="feed"] a[href*="/maps/place/"]').forEach(a => {
         const card = (a.closest('div[jsaction]') ?? a.parentElement) as HTMLElement | null;
@@ -101,6 +102,23 @@ export async function scrapeMapsPack(
       });
       return out;
     });
+
+    // Google keeps re-ranking the feed for a few seconds after results first render
+    // (transient leaders appear, then settle). Parsing that intermediate order is the
+    // main source of the ±1-2 position drift, so poll until the top-8 order is unchanged
+    // across two consecutive reads before trusting it. Falls through after maxRounds so a
+    // perpetually-churning feed still returns its latest snapshot rather than hanging.
+    const topKey = (cards: RawCard[]) => cards.slice(0, 8).map(c => c.name).join('|');
+    let raw = await extractRaw();
+    let prevKey = topKey(raw);
+    for (let round = 0; round < 6; round++) {
+      await new Promise(r => setTimeout(r, 1200));
+      const next = await extractRaw();
+      const nextKey = topKey(next);
+      if (nextKey === prevKey && next.length >= 5) { raw = next; break; }
+      raw = next;
+      prevKey = nextKey;
+    }
 
     const seen = new Set<string>();
     const places: PlaceResult[] = [];

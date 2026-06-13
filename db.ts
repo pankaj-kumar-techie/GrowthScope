@@ -155,6 +155,15 @@ if (!db.prepare(`SELECT 1 FROM migrations WHERE name='flush_mappack_typed_search
   console.log('[DB] Migration: flushed mappack_cache (typed-search Maps scrape)');
 }
 
+// Migration v13: flush cache — the Maps scrape now waits for the results feed to stop
+// re-ranking before reading it (Google streams a transient order for a few seconds after
+// results render). Cached rows were captured mid-rerank and can be off by 1-2 positions.
+if (!db.prepare(`SELECT 1 FROM migrations WHERE name='flush_mappack_stabilized_feed'`).get()) {
+  db.prepare(`DELETE FROM mappack_cache`).run();
+  db.prepare(`INSERT INTO migrations (name) VALUES ('flush_mappack_stabilized_feed')`).run();
+  console.log('[DB] Migration: flushed mappack_cache (stabilized feed read)');
+}
+
 // Migration v5: drop redundant lead_id column (was always equal to domain).
 if (!db.prepare(`SELECT 1 FROM migrations WHERE name='drop_lead_id_column'`).get()) {
   const cols: any[] = db.prepare(`PRAGMA table_info(leads)`).all();

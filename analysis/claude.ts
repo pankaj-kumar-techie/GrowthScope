@@ -169,7 +169,8 @@ ABSOLUTE RULES:
 6. NEVER recommend adding GBP posts if alreadyPostingWeekly=true — pick a different GBP fix.
 7. NEVER recommend adding click-to-call or phone visibility improvements if phoneAboveFoldMobile=true — pick a different page3 fix.
 9. NEVER recommend adding/creating something the LEAD CRAWL booleans show already exists — if hasServiceAreaPages, hasBookingForm, hasEmergencyMessaging, hasFinancing, hasTrustBadges, hasReviewsOnHome, hasStickyCTA, or hasAboveFoldCTA is true, that thing is already on the site, so do not suggest adding it. Pick a fix for something the data shows is actually missing or weak instead.
-10. NO DUPLICATE TOPICS: page5_issues must be about problems NOT already raised in page2_fixes or page3_fixes. If GBP posting frequency, financing visibility, review responses, etc. is already a fix on page 2 or 3, do not raise that same topic again on page 5 under different wording — pick a different gap instead.`;
+10. NO DUPLICATE TOPICS: page5_issues must be about problems NOT already raised in page2_fixes or page3_fixes. If GBP posting frequency, financing visibility, review responses, etc. is already a fix on page 2 or 3, do not raise that same topic again on page 5 under different wording — pick a different gap instead.
+11. NEVER output percentage-uplift or dollar "impact" claims (e.g. "+15–30% map visibility", "$2k/mo at risk") anywhere — those numbers are not measured and are forbidden. Instead, every fix and every page5 issue includes a "metric" field naming the ONE real, measured data point that fix addresses. The report renders the live value itself. Choose "metric" ONLY from this exact list: mobile_speed, mobile_lcp, phone_mobile, sticky_cta, reviews_on_home, trust_badges, service_area, booking_form, financing, emergency, review_gap, reply_rate, gbp_posts, map_position, rating. Pick the one that matches the fix's topic. If none fits, use "" (empty string). Do NOT invent metric names.`;
 
   const prompt = `REAL DATA. USE ONLY THESE:
 Lead: ${lead.name} | ${city}, ${state} | Vertical: ${vertical}
@@ -218,15 +219,15 @@ Output this JSON (all fix arrays must have EXACTLY 3 items):
     "fixes": "4", "fixes_sub": "fixable gaps across your customer journey"
   },
   "page2_headline": "Names competitor + city. Specific to the position gap.",
-  "page2_subhead": "One sentence. Dollar consequence of position gap. Use $${revenue.monthly_loss.toLocaleString()}/mo.",
+  "page2_subhead": "One sentence. Dollar consequence of position gap. Use an estimated $${revenue.monthly_loss.toLocaleString()}/mo (word it as an estimate — 'an estimated $X/mo' — never as a guaranteed/known figure).",
   "page2_the_math": "${mathStr}",
   "page2_fixes": [
-    {"num":"01","title":"Specific GBP fix tied to ranking gap","body":"Specific action with real context.","impact":"+X–Y% map visibility"},
-    {"num":"02","title":"Second specific fix","body":"Different from fix 1.","impact":"+X–Y% result"},
-    {"num":"03","title":"Third specific fix","body":"Different from 1 and 2.","impact":"+X–Y% result"}
+    {"num":"01","title":"Specific GBP/ranking fix tied to the gap","body":"Specific action with real context.","metric":"map_position | review_gap | reply_rate | gbp_posts | service_area | rating"},
+    {"num":"02","title":"Second specific fix","body":"Different from fix 1.","metric":"one of the allowed values"},
+    {"num":"03","title":"Third specific fix","body":"Different from 1 and 2.","metric":"one of the allowed values"}
   ],
   "page3_headline": "${speedScore(speed) < 60 ? 'Three Seconds. No Reason to Stay.' : !phoneAboveFoldMobile ? 'Phone Hidden. Customers Gone.' : 'First Impression Costing You Jobs.'}",
-  "page3_subhead": "Dollar consequence of strongest first-impression issue. Use $${bounceLoss.toLocaleString()}/mo.",
+  "page3_subhead": "Dollar consequence of strongest first-impression issue. Use an estimated $${bounceLoss.toLocaleString()}/mo (word it as an estimate, never a guaranteed figure).",
   "page3_the_math": "~${Math.round(((speedScore(speed) < 60 ? 30 : 15) / 100) * (traffic || 200))} visitors/month leave ${lead.name}'s site before contacting anyone. At $${revenue.avg_ticket} avg job and ${revenue.cvr_typical}% CVR, that's ~$${bounceLoss}/month in missed revenue.",
   "page3_table_rows": [
     {"label":"Mobile Speed","lead_value":"${scoreLabel(speed)}","comp_value":"${scoreLabel(speed_comp)}","lead_wins":${speedScore(speed) > speedScore(speed_comp)},"comp_wins":${speedScore(speed_comp) >= 60}},
@@ -238,13 +239,13 @@ Output this JSON (all fix arrays must have EXACTLY 3 items):
     {"label":"Trust Badges","lead_value":"${crawl.hasTrustBadges ? '✓ Yes' : '✗ No'}","comp_value":"${crawl_comp ? (crawl_comp.hasTrustBadges ? '✓ Yes' : '✗ No') : 'N/A'}","lead_wins":${crawl.hasTrustBadges},"comp_wins":${crawl_comp?.hasTrustBadges ?? true}}
   ],
   "page3_fixes": [
-    {"num":"01","title":"Fix tied to worst table row","body":"Specific action referencing the crawl finding.","impact":"+X–Y% calls"},
-    {"num":"02","title":"Second fix for another losing row","body":"Different action. Reference data.","impact":"+X–Y% result"},
-    {"num":"03","title":"Third fix","body":"Different from 1 and 2.","impact":"+X–Y% result"}
+    {"num":"01","title":"Fix tied to worst table row","body":"Specific action referencing the crawl finding.","metric":"mobile_speed | mobile_lcp | phone_mobile | sticky_cta | reviews_on_home | trust_badges"},
+    {"num":"02","title":"Second fix for another losing row","body":"Different action. Reference data.","metric":"one of the allowed values"},
+    {"num":"03","title":"Third fix","body":"Different from 1 and 2.","metric":"one of the allowed values"}
   ],
   "page5_issues": [
-    {"letter":"A","title":"Issue NOT on pages 2–4","body":"Specific crawl finding + dollar consequence.","impact":"$X–Y/mo at risk"},
-    {"letter":"B","title":"Second issue NOT on pages 2–4","body":"Different finding.","impact":"$X–Y/mo at risk"}
+    {"letter":"A","title":"Issue NOT on pages 2–4","body":"Specific crawl finding + customer consequence (no invented numbers).","metric":"service_area | booking_form | financing | emergency | gbp_posts | \"\""},
+    {"letter":"B","title":"Second issue NOT on pages 2–4","body":"Different finding.","metric":"one of the allowed values or \"\""}
   ],
   "cold_email_hook": "2 sentences. Names ${lead.name}, position #${lead.position}, ${competitor.name} at #${competitor.position}, one specific number. No SEO jargon."
 }
@@ -306,33 +307,33 @@ export function buildFallback(p: any) {
         : "First Impression Costing You Jobs.";
 
   const p5: any[] = [];
-  if (!crawl.hasServiceAreaPages) p5.push({ letter: "A", title: "No Service Area Pages: Google Cannot Find You Locally", body: `Without dedicated pages for each neighborhood you serve, Google cannot rank you for local searches. ${competitor.name} likely has a page for every city they cover. You have one.`, impact: `$${Math.round(revenue.monthly_loss * 0.2).toLocaleString()}–$${Math.round(revenue.monthly_loss * 0.35).toLocaleString()}/mo at risk` });
-  if (!crawl.hasBookingForm) p5.push({ letter: p5.length === 0 ? "A" : "B", title: "No Online Quote Form: Losing After-Hours Leads", body: `Homeowners search at 10pm on Sunday. Without a quote form, anyone visiting outside business hours has no way to reach you. They call whoever made it easy.`, impact: `$${Math.round(revenue.monthly_loss * 0.15).toLocaleString()}–$${Math.round(revenue.monthly_loss * 0.25).toLocaleString()}/mo at risk` });
-  if (!crawl.hasEmergencyMessaging && p5.length < 2) p5.push({ letter: p5.length === 0 ? "A" : "B", title: "No Emergency / 24-7 Messaging: Losing Urgent Calls", body: `In ${vertical}, emergency calls are the highest-value jobs. If your site does not say 24/7 emergency prominently, the homeowner with a burst pipe at midnight calls the one that does.`, impact: `$${Math.round(revenue.monthly_loss * 0.2).toLocaleString()}–$${Math.round(revenue.monthly_loss * 0.3).toLocaleString()}/mo at risk` });
-  if (!crawl.hasFinancing && p5.length < 2) p5.push({ letter: p5.length === 0 ? "A" : "B", title: "No Financing Options: Losing High-Ticket Jobs", body: `For jobs over $2,000, financing closes deals that price-shoppers walk from. Competitors who offer pay-over-time win the job before you even get a callback.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}–$${Math.round(revenue.monthly_loss * 0.2).toLocaleString()}/mo at risk` });
+  if (!crawl.hasServiceAreaPages) p5.push({ letter: "A", title: "No Service Area Pages: Google Cannot Find You Locally", body: `Without dedicated pages for each neighborhood you serve, Google cannot rank you for local searches. ${competitor.name} likely has a page for every city they cover. You have one.`, metric: 'service_area' });
+  if (!crawl.hasBookingForm) p5.push({ letter: p5.length === 0 ? "A" : "B", title: "No Online Quote Form: Losing After-Hours Leads", body: `Homeowners search at 10pm on Sunday. Without a quote form, anyone visiting outside business hours has no way to reach you. They call whoever made it easy.`, metric: 'booking_form' });
+  if (!crawl.hasEmergencyMessaging && p5.length < 2) p5.push({ letter: p5.length === 0 ? "A" : "B", title: "No Emergency / 24-7 Messaging: Losing Urgent Calls", body: `In ${vertical}, emergency calls are the highest-value jobs. If your site does not say 24/7 emergency prominently, the homeowner with a burst pipe at midnight calls the one that does.`, metric: 'emergency' });
+  if (!crawl.hasFinancing && p5.length < 2) p5.push({ letter: p5.length === 0 ? "A" : "B", title: "No Financing Options: Losing High-Ticket Jobs", body: `For jobs over $2,000, financing closes deals that price-shoppers walk from. Competitors who offer pay-over-time win the job before you even get a callback.`, metric: 'financing' });
   if (p5.length === 0) {
-    p5.push({ letter: "A", title: "GBP Photos Below Standard", body: `Google rewards profiles with 30 or more recent photos. If ${competitor.name} posts more than you, they earn ranking signals you are handing them for free.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}/mo at risk` });
-    p5.push({ letter: "B", title: "Add GBP Q&A to Capture Buyer Questions", body: `Seed your GBP Q&A with the 5 most common questions homeowners ask before booking. These surface in search results and filter out tire-kickers before they ever reach ${competitor.name}.`, impact: `$${Math.round(revenue.monthly_loss * 0.1).toLocaleString()}/mo at risk` });
+    p5.push({ letter: "A", title: "GBP Photos Below Standard", body: `Google rewards profiles with 30 or more recent photos. If ${competitor.name} posts more than you, they earn ranking signals you are handing them for free.`, metric: 'gbp_posts' });
+    p5.push({ letter: "B", title: "Add GBP Q&A to Capture Buyer Questions", body: `Seed your GBP Q&A with the 5 most common questions homeowners ask before booking. These surface in search results and filter out tire-kickers before they ever reach ${competitor.name}.`, metric: '' });
   }
 
   const page3Fixes = (() => {
     const out: any[] = [];
     const used = new Set<string>();
-    const add = (title: string, body: string, impact: string) => {
-      if (!used.has(title) && out.length < 3) { used.add(title); out.push({ num: String(out.length + 1).padStart(2, "0"), title, body, impact }); }
+    const add = (title: string, body: string, metric: string) => {
+      if (!used.has(title) && out.length < 3) { used.add(title); out.push({ num: String(out.length + 1).padStart(2, "0"), title, body, metric }); }
     };
-    if (sc(speed) < 70) add("Cut Load Time Below 2 Seconds", `Your mobile score is ${sl(speed)}. Compress images, enable caching, remove render-blocking scripts. Get above 70 and bounce drops immediately.`, "+15–30% bounce reduction");
-    else if (!phoneAboveFoldMobile) add("Move Phone Number Above the Fold", "Your phone number is buried. Add it to the top of every page. Every second a visitor spends looking for how to call, they are dialing someone else.", "+10–20% contact rate");
-    if (!crawl.hasStickyCTA && !phoneAboveFoldMobile) add("Add Sticky Click-to-Call Bar", "A persistent call bar at the top of every mobile page captures intent the moment it strikes. Highest-converting single change for home service sites.", "+15–25% mobile conversions");
-    if (!crawl.hasTrustBadges) add("Add Trust Badges to Hero Section", "Licensed, insured, BBB-accredited. Put these in the first screen. Homeowners hiring a contractor make a safety decision. Give them the signal before they scroll.", "+8–15% conversion lift");
-    if (!crawl.hasReviewsOnHome) add("Show Reviews in the Hero Section", "Embed your Google reviews above the fold. Visitors who see social proof in the first 3 seconds are far more likely to call.", "+10–20% trust conversion");
+    if (sc(speed) < 70) add("Cut Load Time Below 2 Seconds", `Your mobile score is ${sl(speed)}. Compress images, enable caching, remove render-blocking scripts. Get above 70 and bounce drops immediately.`, "mobile_speed");
+    else if (!phoneAboveFoldMobile) add("Move Phone Number Above the Fold", "Your phone number is buried. Add it to the top of every page. Every second a visitor spends looking for how to call, they are dialing someone else.", "phone_mobile");
+    if (!crawl.hasStickyCTA && !phoneAboveFoldMobile) add("Add Sticky Click-to-Call Bar", "A persistent call bar at the top of every mobile page captures intent the moment it strikes. Highest-converting single change for home service sites.", "sticky_cta");
+    if (!crawl.hasTrustBadges) add("Add Trust Badges to Hero Section", "Licensed, insured, BBB-accredited. Put these in the first screen. Homeowners hiring a contractor make a safety decision. Give them the signal before they scroll.", "trust_badges");
+    if (!crawl.hasReviewsOnHome) add("Show Reviews in the Hero Section", "Embed your Google reviews above the fold. Visitors who see social proof in the first 3 seconds are far more likely to call.", "reviews_on_home");
     // Guaranteed fillers — only suggest what the business doesn't already have
-    add("Cut Load Time Below 2 Seconds", `Your mobile score is ${sl(speed)}. Compress images, enable caching, remove render-blocking scripts. Get above 70 and bounce drops immediately.`, "+15–30% bounce reduction");
-    if (!crawl.hasStickyCTA) add("Add Sticky Click-to-Call Bar", "A persistent call bar captures call intent the moment it strikes. This is the highest-converting single change for home service sites.", "+15–25% mobile conversions");
-    if (!crawl.hasTrustBadges) add("Add Trust Badges to Hero Section", "Licensed, insured, BBB-accredited. Put these in the first screen before the visitor has a chance to doubt.", "+8–15% conversion lift");
-    if (!crawl.hasReviewsOnHome) add("Show Reviews in the Hero Section", "Embed your Google reviews above the fold. Visitors who see social proof in the first 3 seconds are far more likely to call.", "+10–20% trust conversion");
-    if (!crawl.hasBookingForm) add("Add an Online Quote Request Form", "Let visitors request a quote at 2am. A simple above-fold form routes leads directly to your inbox. Home service leads respond 90% better within 5 minutes.", "+12–20% lead capture");
-    add("Compress and Lazy-Load All Images", "Large images are the #1 cause of slow mobile loads. Run every image through TinyPNG and add loading='lazy'. Takes 2 hours and cuts load time 30–40%.", "+10–20% speed improvement");
+    add("Cut Load Time Below 2 Seconds", `Your mobile score is ${sl(speed)}. Compress images, enable caching, remove render-blocking scripts. Get above 70 and bounce drops immediately.`, "mobile_speed");
+    if (!crawl.hasStickyCTA) add("Add Sticky Click-to-Call Bar", "A persistent call bar captures call intent the moment it strikes. This is the highest-converting single change for home service sites.", "sticky_cta");
+    if (!crawl.hasTrustBadges) add("Add Trust Badges to Hero Section", "Licensed, insured, BBB-accredited. Put these in the first screen before the visitor has a chance to doubt.", "trust_badges");
+    if (!crawl.hasReviewsOnHome) add("Show Reviews in the Hero Section", "Embed your Google reviews above the fold. Visitors who see social proof in the first 3 seconds are far more likely to call.", "reviews_on_home");
+    if (!crawl.hasBookingForm) add("Add an Online Quote Request Form", "Let visitors request a quote at 2am. A simple above-fold form routes leads directly to your inbox. Home service leads respond fastest within 5 minutes.", "booking_form");
+    add("Compress and Lazy-Load All Images", "Large images are the #1 cause of slow mobile loads. Run every image through TinyPNG and add loading='lazy'. Takes 2 hours and cuts load time meaningfully.", "mobile_speed");
     return out;
   })();
 
@@ -350,18 +351,18 @@ export function buildFallback(p: any) {
     page2_fixes: (() => {
       const fixes: any[] = [];
       if (!alreadyPostingWeekly) {
-        fixes.push({ num: "01", title: "Complete Your Google Business Profile", body: `Add 30+ recent photos, fill every service category, post weekly. GBP completeness is a direct ranking factor. This alone can move you 1 to 2 positions.`, impact: "+15–30% map visibility" });
+        fixes.push({ num: "01", title: "Complete Your Google Business Profile", body: `Add 30+ recent photos, fill every service category, post weekly. GBP completeness is a direct ranking factor and one of the fastest levers on your map position.`, metric: "gbp_posts" });
       } else {
-        fixes.push({ num: "01", title: "Add More GBP Photos with Job Sites", body: `Post before/after photos from actual ${city} jobs. Google rewards profiles with 30+ recent, geo-tagged photos. Each new photo batch drives a small ranking boost.`, impact: "+10–20% map visibility" });
+        fixes.push({ num: "01", title: "Add More GBP Photos with Job Sites", body: `Post before/after photos from actual ${city} jobs. Google rewards profiles with 30+ recent, geo-tagged photos.`, metric: "gbp_posts" });
       }
-      fixes.push({ num: "02", title: "Build Neighborhood-Level Service Pages", body: `Create dedicated pages for every city and neighborhood you serve. Right now you compete on one generic page. ${competitor.name} likely targets multiple local areas.`, impact: "+10–25% local search coverage" });
+      fixes.push({ num: "02", title: "Build Neighborhood-Level Service Pages", body: `Create dedicated pages for every city and neighborhood you serve. Right now you compete on one generic page. ${competitor.name} likely targets multiple local areas.`, metric: "service_area" });
       if (!alreadyRespondingToReviews) {
-        fixes.push({ num: "03", title: "Reply to Every Unanswered Google Review", body: `You're not responding to reviews. Google treats owner replies as an engagement signal — profiles that respond rank higher. Block an hour and reply to every open review.`, impact: "+10–20% GBP visibility" });
+        fixes.push({ num: "03", title: "Reply to Every Unanswered Google Review", body: `You're not responding to reviews. Google treats owner replies as an engagement signal — profiles that respond rank higher. Block an hour and reply to every open review.`, metric: "reply_rate" });
       } else if (hasUnansweredButGenerallyResponds) {
         const n = unansweredCount || 'some';
-        fixes.push({ num: "03", title: `Reply to Your ${n} Unanswered Review${unansweredCount !== 1 ? 's' : ''}`, body: `You respond to most reviews — a strong habit. But ${n} review${unansweredCount !== 1 ? 's are' : ' is'} still waiting. Homeowners read recent reviews first. A quick reply closes the gap and shows you're active.`, impact: "+3–8% trust signal" });
+        fixes.push({ num: "03", title: `Reply to Your ${n} Unanswered Review${unansweredCount !== 1 ? 's' : ''}`, body: `You respond to most reviews — a strong habit. But ${n} review${unansweredCount !== 1 ? 's are' : ' is'} still waiting. Homeowners read recent reviews first. A quick reply closes the gap and shows you're active.`, metric: "reply_rate" });
       } else {
-        fixes.push({ num: "03", title: "Add Q&A to Your GBP Profile", body: `Seed your GBP Q&A section with 5 buyer-intent questions and answer them. These appear directly in search results and push competitors lower on the listing.`, impact: "+5–10% click rate" });
+        fixes.push({ num: "03", title: "Add Q&A to Your GBP Profile", body: `Seed your GBP Q&A section with 5 buyer-intent questions and answer them. These appear directly in search results and push competitors lower on the listing.`, metric: "" });
       }
       return fixes;
     })(),

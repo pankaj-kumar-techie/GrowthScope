@@ -72,6 +72,17 @@ export function generateLiteReportHTML(p: LiteReportParams): string {
   const fmt = (v: string | undefined, fallback = 'Not specified') =>
     v && v.trim() && v.trim().toLowerCase() !== 'null' ? esc(v) : fallback;
 
+  // The rank is measured on whichever Google surface produced verificationUrl: Google
+  // Maps (…/maps/…) or the local results inside Google Search (…/search?…&udm=…). These
+  // two surfaces are ranked by Google independently and legitimately differ by a
+  // position or two. The report's label, verification link, and the number it cites must
+  // all describe the SAME surface — otherwise a client who happens to check the *other*
+  // surface sees a different position and (reasonably) concludes the report is wrong.
+  // That mismatch was the source of "the positions don't match" complaints.
+  const onMaps       = /google\.com\/maps/.test(verificationUrl);
+  const surfaceLabel = onMaps ? 'Google Maps' : "Google's local search results";
+  const rankNote     = `Note: ${onMaps ? 'Google Maps' : "Google's local results"} are personalized by your location, signed-in account, and time of day — and Google Maps and the local pack in Google Search are ranked separately, so a manual check can land a position or two off. This is a live snapshot, not a fixed score.`;
+
   const headline  = pickHeadline(lead.position, competitor.name, lead.review_count, competitor.review_count, competitor.position);
   const isTop     = lead.position === 1;
   // The challenger's edge: review volume when they have more reviews, rating otherwise.
@@ -79,7 +90,7 @@ export function generateLiteReportHTML(p: LiteReportParams): string {
     ? `${(competitor.review_count||0).toLocaleString()} reviews vs your ${(lead.review_count||0).toLocaleString()}`
     : `a ${(competitor.rating||0).toFixed(1)}★ rating vs your ${(lead.rating||0).toFixed(1)}★`;
   const heroSub   = isTop
-    ? `We checked your Google Maps footprint for '${verticalEsc}' in ${cityEsc}. You hold #1 — but ${esc(competitor.name.split(' ')[0])} is right behind at #${competitor.position} with ${compEdge}. Here's what's keeping you there — and what could knock you off.`
+    ? `We checked your ${surfaceLabel} footprint for '${verticalEsc}' in ${cityEsc}. You hold #1 — but ${esc(competitor.name.split(' ')[0])} is right behind at #${competitor.position} with ${compEdge}. Here's what's keeping you there — and what could knock you off.`
     : `We followed your customer's path — from Google search to phone call — and flagged where you lose them.`;
   const gapCopy   = isTop
     ? `You currently hold #1 for '${verticalEsc}' searches in ${cityEsc}. But ${compName} at #${competitor.position} has ${compEdge} — a narrow lead. Without active optimization, that position flips fast. Protecting it is worth an estimated $${revenue.loss_low_usd.toLocaleString()}–$${revenue.loss_high_usd.toLocaleString()}/month in recurring revenue.`
@@ -186,7 +197,7 @@ body{font-family:'Outfit',sans-serif;-webkit-print-color-adjust:exact;print-colo
         <div class="bn-section-lbl">Your Numbers</div>
         <div class="bn-item">
           <div class="bn-val">#${lead.position > 20 ? '>20' : lead.position}</div>
-          <div class="bn-lbl">Google Maps rank for '${verticalEsc}' in ${cityEsc}</div>
+          <div class="bn-lbl">${surfaceLabel} rank for '${verticalEsc}' in ${cityEsc}</div>
         </div>
         ${lead.organic_position ? `<div class="bn-item">
           <div class="bn-val">#${lead.organic_position}</div>
@@ -214,7 +225,7 @@ body{font-family:'Outfit',sans-serif;-webkit-print-color-adjust:exact;print-colo
         <div class="inside-item"><strong>Service Area</strong><br>${fmt(lead.service_area, 'Not clearly specified')}</div>
 
         <div class="inside-section-lbl" style="margin-top:20px;">${isTop ? 'Closest Challenger' : `Your #${competitor.position} Competitor`}</div>
-        <div class="inside-item"><strong>${compName}</strong><br>Ranked #${competitor.position} on Google Maps</div>
+        <div class="inside-item"><strong>${compName}</strong><br>Ranked #${competitor.position} on ${surfaceLabel}</div>
         <div class="inside-item">${(competitor.review_count || 0).toLocaleString()} reviews · ${(competitor.rating || 0).toFixed(1)}★</div>
       </div>
     </div>
@@ -233,7 +244,7 @@ body{font-family:'Outfit',sans-serif;-webkit-print-color-adjust:exact;print-colo
     <div class="map-list">
       ${mapRows}
     </div>
-    <p style="font-size:10px;color:#999;margin:-8px 0 14px;">See this list yourself: <a href="${esc(verificationUrl)}" style="color:#999;">search "${verticalEsc} in ${cityEsc}" on Google Maps</a>. Rankings shift with time and the searcher's location — this is a live snapshot, not a fixed score.</p>
+    <p style="font-size:10px;color:#999;margin:-8px 0 14px;">See this list yourself: <a href="${esc(verificationUrl)}" style="color:#999;">open the exact "${verticalEsc} in ${cityEsc}" search on ${surfaceLabel}</a>. ${rankNote}</p>
 
     <div class="math">
       <div class="math-lbl">${isTop ? 'What Losing This Spot Costs' : 'What This Gap Costs'}</div>
